@@ -1,32 +1,76 @@
 const assert = require('assert');
-const adrenaline = require('../build/Release/adrenaline.node');
+const adrenaline = require('../index.js');
 
-// Test 1: ping
+console.log('Testing ping...');
 const pingResult = adrenaline.ping();
 console.log('Ping result:', pingResult);
 assert.strictEqual(pingResult, 'Adrenaline Core v0.1.0 is Alive!');
 
-// Test 2: Non-blocking window creation
-console.log('Testing non-blocking window creation...');
-let loggedImmediately = false;
+console.log('Testing non-blocking window creation and bidirectional IPC...');
 
-const winId = adrenaline.createWindow({
-  title: 'Adrenaline.js PoC',
-  width: 600,
-  height: 400,
-  html: '<h1>Adrenaline.js is Running! 🚀</h1>'
+const html = `
+<!DOCTYPE html>
+<html>
+<head><title>IPC Test</title></head>
+<body>
+    <p id="status">Initial</p>
+    <script>
+        setTimeout(function() {
+            if (window.adrenaline && window.adrenaline.send) {
+                window.adrenaline.send('ping', { count: 1 });
+            }
+        }, 100);
+
+        function verifyPong() {
+            var text = document.getElementById('status').innerText;
+            if (text === 'Pong from Node.js!') {
+                window.adrenaline.send('pong-verified', { status: 'success' });
+            }
+        }
+    </script>
+</body>
+</html>
+`;
+
+let pingReceived = false;
+let pongVerified = false;
+
+const win = adrenaline.createWindow({
+    title: 'Adrenaline Test Window',
+    width: 600,
+    height: 400,
+    html: html
 });
 
-console.log('Window created successfully, Node.js loop still running!');
-loggedImmediately = true;
+assert.ok(win && typeof win.id === 'number' && win.id > 0, 'Window instance should have a positive numeric ID');
 
-assert.ok(typeof winId === 'number' && winId > 0, 'Window ID should be a positive number');
-assert.ok(loggedImmediately, 'Log statement executed immediately without blocking');
+win.on('ipc-message', (channel, data) => {
+    console.log(`Received IPC message [${channel}]:`, data);
+    if (channel === 'ping') {
+        pingReceived = true;
+        assert.deepStrictEqual(data, { count: 1 });
+        console.log('Sending eval to Webview...');
+        win.eval("document.getElementById('status').innerText = 'Pong from Node.js!'; verifyPong();");
+    } else if (channel === 'pong-verified') {
+        pongVerified = true;
+        assert.deepStrictEqual(data, { status: 'success' });
+        console.log('Pong verified successfully!');
+    }
+});
 
-setTimeout(() => {
-  const closed = adrenaline.closeWindow(winId);
-  console.log('Window close result:', closed);
-  assert.strictEqual(closed, true, 'Window should close successfully');
-  console.log('All tests passed!');
-  process.exit(0);
-}, 1000);
+const timeout = setTimeout(() => {
+    console.error('Test timed out!');
+    process.exit(1);
+}, 5000);
+
+const checkInterval = setInterval(() => {
+    if (pingReceived && pongVerified) {
+        clearInterval(checkInterval);
+        clearTimeout(timeout);
+        console.log('All IPC tests passed! Closing window...');
+        const closed = win.close();
+        assert.strictEqual(closed, true, 'Window should close successfully');
+        console.log('All tests completed successfully!');
+        process.exit(0);
+    }
+}, 200);
