@@ -42,8 +42,11 @@ app.whenReady().then(() => {
 
     ipcMain.on('greeting-ack', (event, data) => {
         console.log('Greeting ACK received:', data);
-        console.log('Closing window...');
-        win.close();
+        console.log('Closing window in 5 seconds...');
+        setTimeout(() => {
+            console.log('Closing window now...');
+            win.close();
+        }, 5000);
     });
 });
 
