@@ -51,6 +51,11 @@ app.whenReady().then(() => {
     const win = new BrowserWindow({
         width: 700,
         height: 500,
+        resizable: true,
+        minWidth: 300,
+        minHeight: 200,
+        maxWidth: 1200,
+        maxHeight: 900,
         title: 'Initial Title',
         html: htmlContent
     });
