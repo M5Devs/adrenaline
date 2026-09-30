@@ -19,6 +19,12 @@ struct WindowInstance {
     std::string url;
     std::string html;
 
+    bool resizable{true};
+    int minWidth{0};
+    int minHeight{0};
+    int maxWidth{0};
+    int maxHeight{0};
+
     webview::webview* wv{nullptr};
     std::thread th;
     std::atomic<bool> is_running{false};
@@ -40,6 +46,11 @@ Napi::Value CreateWindow(const Napi::CallbackInfo& info) {
     int height = 600;
     std::string url = "";
     std::string html = "";
+    bool resizable = true;
+    int minWidth = 0;
+    int minHeight = 0;
+    int maxWidth = 0;
+    int maxHeight = 0;
 
     Napi::Function ipc_cb;
     bool has_ipc_cb = false;
@@ -62,6 +73,21 @@ Napi::Value CreateWindow(const Napi::CallbackInfo& info) {
         if (opts.Has("html") && opts.Get("html").IsString()) {
             html = opts.Get("html").As<Napi::String>().Utf8Value();
         }
+        if (opts.Has("resizable") && opts.Get("resizable").IsBoolean()) {
+            resizable = opts.Get("resizable").As<Napi::Boolean>().Value();
+        }
+        if (opts.Has("minWidth") && opts.Get("minWidth").IsNumber()) {
+            minWidth = opts.Get("minWidth").As<Napi::Number>().Int32Value();
+        }
+        if (opts.Has("minHeight") && opts.Get("minHeight").IsNumber()) {
+            minHeight = opts.Get("minHeight").As<Napi::Number>().Int32Value();
+        }
+        if (opts.Has("maxWidth") && opts.Get("maxWidth").IsNumber()) {
+            maxWidth = opts.Get("maxWidth").As<Napi::Number>().Int32Value();
+        }
+        if (opts.Has("maxHeight") && opts.Get("maxHeight").IsNumber()) {
+            maxHeight = opts.Get("maxHeight").As<Napi::Number>().Int32Value();
+        }
         if (opts.Has("onIpc") && opts.Get("onIpc").IsFunction()) {
             ipc_cb = opts.Get("onIpc").As<Napi::Function>();
             has_ipc_cb = true;
@@ -81,6 +107,11 @@ Napi::Value CreateWindow(const Napi::CallbackInfo& info) {
     instance->height = height;
     instance->url = url;
     instance->html = html;
+    instance->resizable = resizable;
+    instance->minWidth = minWidth;
+    instance->minHeight = minHeight;
+    instance->maxWidth = maxWidth;
+    instance->maxHeight = maxHeight;
 
     if (has_ipc_cb) {
         instance->tsfn = Napi::ThreadSafeFunction::New(
@@ -101,9 +132,16 @@ Napi::Value CreateWindow(const Napi::CallbackInfo& info) {
     instance->th = std::thread([instance]() {
         try {
             webview::webview wv(false, nullptr);
-            instance->wv = &wv;
             wv.set_title(instance->title.c_str());
-            wv.set_size(instance->width, instance->height, WEBVIEW_HINT_NONE);
+
+            webview_hint_t hint = instance->resizable ? WEBVIEW_HINT_NONE : WEBVIEW_HINT_FIXED;
+            wv.set_size(instance->width, instance->height, hint);
+            if (instance->minWidth > 0 || instance->minHeight > 0) {
+                wv.set_size(instance->minWidth, instance->minHeight, WEBVIEW_HINT_MIN);
+            }
+            if (instance->maxWidth > 0 || instance->maxHeight > 0) {
+                wv.set_size(instance->maxWidth, instance->maxHeight, WEBVIEW_HINT_MAX);
+            }
 
             wv.bind("__adrenaline_ipc_send", [instance](const std::string& seq, const std::string& req, void* /*arg*/) {
                 if (instance->wv) {
@@ -186,6 +224,7 @@ Napi::Value CreateWindow(const Napi::CallbackInfo& info) {
                 wv.navigate(instance->url.c_str());
             }
 
+            instance->wv = &wv;
             instance->is_running = true;
             wv.run();
             instance->is_running = false;
@@ -278,6 +317,43 @@ Napi::Value EvalWindow(const Napi::CallbackInfo& info) {
             });
             return Napi::Boolean::New(env, true);
         }
+    }
+
+    return Napi::Boolean::New(env, false);
+}
+
+Napi::Value NavigateWindow(const Napi::CallbackInfo& info) {
+    Napi::Env env = info.Env();
+
+    if (info.Length() < 2 || !info[0].IsNumber() || !info[1].IsString()) {
+        Napi::TypeError::New(env, "Expected window ID (number) and URL (string)").ThrowAsJavaScriptException();
+        return env.Null();
+    }
+
+    int window_id = info[0].As<Napi::Number>().Int32Value();
+    std::string url = info[1].As<Napi::String>().Utf8Value();
+
+    std::shared_ptr<WindowInstance> instance;
+    {
+        std::lock_guard<std::mutex> lock(g_windows_mutex);
+        auto it = g_windows.find(window_id);
+        if (it != g_windows.end()) {
+            instance = it->second;
+        }
+    }
+
+    if (instance) {
+        instance->url = url;
+        if (instance->wv) {
+            std::string url_copy = url;
+            instance->wv->dispatch([instance, url_copy]() {
+                if (instance->wv) {
+                    instance->wv->navigate(url_copy);
+                }
+            });
+            return Napi::Boolean::New(env, true);
+        }
+        return Napi::Boolean::New(env, true);
     }
 
     return Napi::Boolean::New(env, false);

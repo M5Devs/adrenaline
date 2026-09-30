@@ -11,6 +11,7 @@ Napi::Object Init(Napi::Env env, Napi::Object exports) {
     exports.Set(Napi::String::New(env, "createWindow"), Napi::Function::New(env, Adrenaline::CreateWindow));
     exports.Set(Napi::String::New(env, "closeWindow"), Napi::Function::New(env, Adrenaline::CloseWindow));
     exports.Set(Napi::String::New(env, "evalWindow"), Napi::Function::New(env, Adrenaline::EvalWindow));
+    exports.Set(Napi::String::New(env, "navigateWindow"), Napi::Function::New(env, Adrenaline::NavigateWindow));
     return exports;
 }
 
