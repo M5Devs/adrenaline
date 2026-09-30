@@ -149,7 +149,36 @@ Napi::Value CreateWindow(const Napi::CallbackInfo& info) {
                 }
             }, nullptr);
 
-            wv.init("window.adrenaline = { send: function(channel, data) { return window.__adrenaline_ipc_send(channel, data); } };");
+            wv.init(R"raw(
+                window.adrenaline = window.adrenaline || {};
+                window.adrenaline.send = function(channel, data) { return window.__adrenaline_ipc_send(channel, data); };
+                window.adrenaline._listeners = window.adrenaline._listeners || {};
+                window.adrenaline.on = function(channel, cb) {
+                    window.adrenaline._listeners[channel] = window.adrenaline._listeners[channel] || [];
+                    window.adrenaline._listeners[channel].push(cb);
+                };
+                window.adrenaline._onMessage = function(channel, data) {
+                    var cbs = window.adrenaline._listeners[channel];
+                    if (cbs) {
+                        cbs.slice().forEach(function(cb) { cb(data); });
+                    }
+                };
+                window.__adrenaline_callbacks = window.__adrenaline_callbacks || {};
+                window.__adrenaline_ipc_reply = function(reqId, err, result) {
+                    if (window.__adrenaline_callbacks[reqId]) {
+                        if (err) window.__adrenaline_callbacks[reqId].reject(new Error(err));
+                        else window.__adrenaline_callbacks[reqId].resolve(result);
+                        delete window.__adrenaline_callbacks[reqId];
+                    }
+                };
+                window.adrenaline.invoke = function(channel, data) {
+                    return new Promise(function(resolve, reject) {
+                        var reqId = Math.random().toString(36).substring(2) + Date.now();
+                        window.__adrenaline_callbacks[reqId] = { resolve: resolve, reject: reject };
+                        window.adrenaline.send('__adrenaline_ipc_invoke', { reqId: reqId, channel: channel, data: data });
+                    });
+                };
+            )raw");
 
             if (!instance->html.empty()) {
                 wv.set_html(instance->html.c_str());
