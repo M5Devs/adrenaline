@@ -1,8 +1,8 @@
-const adrenaline = require('../build/Release/adrenaline.node');
+const adrenaline = require('../index.js');
 
 console.log('Creating window...');
 
-const winHandle = adrenaline.createWindow({
+const win = adrenaline.createWindow({
   title: 'Adrenaline.js PoC',
   width: 600,
   height: 400,
@@ -13,6 +13,6 @@ console.log('Window created successfully, Node.js loop still running!');
 
 setTimeout(() => {
   console.log('Closing window automatically after timeout...');
-  adrenaline.closeWindow(winHandle);
+  win.close();
   console.log('Window closed successfully.');
 }, 2000);
