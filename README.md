@@ -7,6 +7,8 @@
 
 Adrenaline.js is an ultra-lightweight, high-performance desktop application framework for Node.js developers. By using native OS system webviews (WebKit on macOS/Linux, WebView2 on Windows) instead of bundling an entire Chromium browser, Adrenaline delivers blazing-fast desktop applications with tiny bundle sizes and minimal memory footprint.
 
+> *"Why not Tauri? Tauri is brilliant, but writing backend logic shouldn't require learning Rust and fighting the borrow checker. Adrenaline gives you the same lightweight native webviews using 100% Node.js and the full npm ecosystem you already know."*
+
 ---
 
 ## ⚡ Key Features
@@ -14,6 +16,7 @@ Adrenaline.js is an ultra-lightweight, high-performance desktop application fram
 - **Tiny Bundle & Footprint (5-10 MB vs 150 MB+):** Native system webviews remove Chromium bloat, drastically reducing application installer size and RAM usage.
 - **Zero Rust / Go Barrier:** Written 100% for Node.js & JavaScript developers. Use your favorite npm packages without learning a new language or toolchain.
 - **Drop-in Electron-like API:** Work with familiar APIs like `app`, `BrowserWindow`, and `ipcMain` out of the box with zero learning curve.
+- **Full TypeScript & Dual ESM/CJS Support:** First-class TypeScript type declarations (`index.d.ts`) with seamless CommonJS (`require`) and ES Module (`import`) exports.
 - **Bidirectional IPC:** High-speed asynchronous inter-process communication between Node.js backend processes and webview frontends.
 - **Built-in CLI & Scaffolder:** Instant project scaffolding and execution with `npx adrenaline-js init` and `adrenaline dev`.
 

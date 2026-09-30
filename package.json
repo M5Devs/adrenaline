@@ -1,8 +1,16 @@
 {
   "name": "adrenaline-js",
-  "version": "0.1.1",
+  "version": "0.1.5",
   "description": "Desktop app framework using Node.js and webview.h",
   "main": "index.js",
+  "types": "./index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "import": "./index.mjs",
+      "require": "./index.js"
+    }
+  },
   "scripts": {
     "build": "node-gyp rebuild",
     "install": "node-gyp rebuild",
