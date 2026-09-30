@@ -13,5 +13,8 @@
   },
   "devDependencies": {
     "node-gyp": "^10.0.0"
+  },
+  "bin": {
+    "adrenaline": "./bin/cli.js"
   }
 }

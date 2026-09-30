@@ -1,0 +1,13 @@
+{
+  "name": "my-adrenaline-app",
+  "version": "1.0.0",
+  "description": "An ultra-lightweight desktop app built with Adrenaline.js",
+  "main": "main.js",
+  "scripts": {
+    "start": "adrenaline start",
+    "dev": "adrenaline dev"
+  },
+  "dependencies": {
+    "adrenaline": "^0.1.0"
+  }
+}
