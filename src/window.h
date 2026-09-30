@@ -1,0 +1,13 @@
+#ifndef WINDOW_H
+#define WINDOW_H
+
+#include <napi.h>
+
+namespace Adrenaline {
+
+Napi::Value CreateWindow(const Napi::CallbackInfo& info);
+Napi::Value CloseWindow(const Napi::CallbackInfo& info);
+
+} // namespace Adrenaline
+
+#endif // WINDOW_H

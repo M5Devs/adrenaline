@@ -1,6 +1,5 @@
 #include <napi.h>
-#include <iostream>
-#include "vendor/webview.h"
+#include "window.h"
 
 Napi::String Ping(const Napi::CallbackInfo& info) {
     Napi::Env env = info.Env();
@@ -9,6 +8,8 @@ Napi::String Ping(const Napi::CallbackInfo& info) {
 
 Napi::Object Init(Napi::Env env, Napi::Object exports) {
     exports.Set(Napi::String::New(env, "ping"), Napi::Function::New(env, Ping));
+    exports.Set(Napi::String::New(env, "createWindow"), Napi::Function::New(env, Adrenaline::CreateWindow));
+    exports.Set(Napi::String::New(env, "closeWindow"), Napi::Function::New(env, Adrenaline::CloseWindow));
     return exports;
 }
 
