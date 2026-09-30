@@ -1,0 +1,17 @@
+{
+  "name": "adrenaline",
+  "version": "0.1.0",
+  "description": "Desktop app framework using Node.js and webview.h",
+  "main": "index.js",
+  "scripts": {
+    "build": "node-gyp rebuild",
+    "install": "node-gyp rebuild",
+    "test": "node test/test.js"
+  },
+  "dependencies": {
+    "node-addon-api": "^8.0.0"
+  },
+  "devDependencies": {
+    "node-gyp": "^10.0.0"
+  }
+}
