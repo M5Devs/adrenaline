@@ -1,6 +1,6 @@
 {
   "name": "adrenaline-js",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Desktop app framework using Node.js and webview.h",
   "main": "index.js",
   "scripts": {
