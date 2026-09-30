@@ -1,5 +1,5 @@
 {
-  "name": "adrenaline",
+  "name": "adrenaline-js",
   "version": "0.1.0",
   "description": "Desktop app framework using Node.js and webview.h",
   "main": "index.js",

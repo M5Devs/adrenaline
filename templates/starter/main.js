@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain } = require('adrenaline');
+const { app, BrowserWindow, ipcMain } = require('adrenaline-js');
 const path = require('path');
 const fs = require('fs');
 

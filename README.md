@@ -15,7 +15,7 @@ Adrenaline.js is an ultra-lightweight, high-performance desktop application fram
 - **Zero Rust / Go Barrier:** Written 100% for Node.js & JavaScript developers. Use your favorite npm packages without learning a new language or toolchain.
 - **Drop-in Electron-like API:** Work with familiar APIs like `app`, `BrowserWindow`, and `ipcMain` out of the box with zero learning curve.
 - **Bidirectional IPC:** High-speed asynchronous inter-process communication between Node.js backend processes and webview frontends.
-- **Built-in CLI & Scaffolder:** Instant project scaffolding and execution with `npx adrenaline init` and `adrenaline dev`.
+- **Built-in CLI & Scaffolder:** Instant project scaffolding and execution with `npx adrenaline-js init` and `adrenaline dev`.
 
 ---
 
@@ -25,7 +25,9 @@ Scaffold and launch a new project in seconds:
 
 ```bash
 # 1. Create a new Adrenaline.js project
-npx adrenaline init my-app
+npm install adrenaline-js
+# or scaffold a new project:
+npx adrenaline-js init my-app
 
 # 2. Navigate to your project folder
 cd my-app
@@ -58,7 +60,7 @@ npx adrenaline dev
 ### Main Process (`main.js`)
 
 ```javascript
-const { app, BrowserWindow, ipcMain } = require('adrenaline');
+const { app, BrowserWindow, ipcMain } = require('adrenaline-js');
 const path = require('path');
 
 app.whenReady().then(() => {

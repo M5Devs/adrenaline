@@ -38,12 +38,12 @@ try {
     const scaffoldedPkg = JSON.parse(fs.readFileSync(path.join(testAppDir, 'package.json'), 'utf8'));
     assert.strictEqual(scaffoldedPkg.name, testAppName, 'Scaffolded package.json name should match project name');
 
-    // Create node_modules/adrenaline inside testAppDir to point to root index.js so require('adrenaline') works directly
+    // Create node_modules/adrenaline-js inside testAppDir to point to root index.js so require('adrenaline-js') works directly
     const nodeModulesDir = path.join(testAppDir, 'node_modules');
-    const adrenalinePackageDir = path.join(nodeModulesDir, 'adrenaline');
+    const adrenalinePackageDir = path.join(nodeModulesDir, 'adrenaline-js');
     fs.mkdirSync(adrenalinePackageDir, { recursive: true });
 
-    // Copy/link root index.js, package.json, lib and build into testAppDir node_modules/adrenaline
+    // Copy/link root index.js, package.json, lib and build into testAppDir node_modules/adrenaline-js
     fs.copyFileSync(path.join(projectRoot, 'index.js'), path.join(adrenalinePackageDir, 'index.js'));
     fs.copyFileSync(path.join(projectRoot, 'package.json'), path.join(adrenalinePackageDir, 'package.json'));
 

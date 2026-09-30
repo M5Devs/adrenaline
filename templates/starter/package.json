@@ -8,6 +8,6 @@
     "dev": "adrenaline dev"
   },
   "dependencies": {
-    "adrenaline": "^0.1.0"
+    "adrenaline-js": "^0.1.0"
   }
 }
