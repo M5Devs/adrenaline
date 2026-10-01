@@ -1,4 +1,5 @@
 #include "window.h"
+#include "features.h"
 #include "vendor/webview.h"
 
 #include <thread>
@@ -37,6 +38,19 @@ struct WindowInstance {
 static std::atomic<int> g_next_window_id{1};
 static std::unordered_map<int, std::shared_ptr<WindowInstance>> g_windows;
 static std::mutex g_windows_mutex;
+
+Napi::Value GetCompiledFeatures(const Napi::CallbackInfo& info) {
+    Napi::Env env = info.Env();
+    Napi::Object feats = Napi::Object::New(env);
+
+    feats.Set("devtools", Napi::Boolean::New(env, ADREN_FEATURE_DEVTOOLS != 0));
+    feats.Set("localFiles", Napi::Boolean::New(env, ADREN_FEATURE_LOCAL_FILES != 0));
+    feats.Set("pdf", Napi::Boolean::New(env, ADREN_FEATURE_PDF != 0));
+    feats.Set("cef", Napi::Boolean::New(env, ADREN_FEATURE_CEF != 0));
+    feats.Set("webview", Napi::Boolean::New(env, ADREN_FEATURE_WEBVIEW != 0));
+
+    return feats;
+}
 
 Napi::Value CreateWindow(const Napi::CallbackInfo& info) {
     Napi::Env env = info.Env();
@@ -131,7 +145,11 @@ Napi::Value CreateWindow(const Napi::CallbackInfo& info) {
 
     instance->th = std::thread([instance]() {
         try {
-            webview::webview wv(false, nullptr);
+            bool debug_flag = false;
+#if ADREN_FEATURE_DEVTOOLS
+            debug_flag = true;
+#endif
+            webview::webview wv(debug_flag, nullptr);
             wv.set_title(instance->title.c_str());
 
             webview_hint_t hint = instance->resizable ? WEBVIEW_HINT_NONE : WEBVIEW_HINT_FIXED;

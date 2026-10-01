@@ -3,6 +3,7 @@ const native = require('./build/Release/adrenaline.node');
 const app = require('./lib/app');
 const BrowserWindow = require('./lib/browser-window');
 const ipcMain = require('./lib/ipc-main');
+const features = require('./lib/features');
 
 class Window extends EventEmitter {
     constructor(options = {}) {
@@ -39,6 +40,7 @@ module.exports = {
     app,
     BrowserWindow,
     ipcMain,
+    features,
     ping: native.ping,
     createWindow,
     Window,

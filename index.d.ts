@@ -1,5 +1,13 @@
 import { EventEmitter } from 'events';
 
+export interface CompiledFeatures {
+  devtools: boolean;
+  localFiles: boolean;
+  pdf: boolean;
+  cef: boolean;
+  webview: boolean;
+}
+
 export interface BrowserWindowOptions {
   width?: number;
   height?: number;
@@ -28,6 +36,7 @@ export class BrowserWindow extends EventEmitter {
   loadURL(url: string): Promise<void> | void;
   close(): boolean | void;
   setTitle(title: string): void;
+  openDevTools(): boolean | void;
 }
 
 export interface App extends EventEmitter {
@@ -45,3 +54,4 @@ export interface IpcMain extends EventEmitter {
 export const app: App;
 export const BrowserWindow: typeof BrowserWindow;
 export const ipcMain: IpcMain;
+export const features: CompiledFeatures;
