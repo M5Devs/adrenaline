@@ -1,4 +1,5 @@
 #include <napi.h>
+#include "features.h"
 #include "window.h"
 
 Napi::String Ping(const Napi::CallbackInfo& info) {
@@ -12,6 +13,7 @@ Napi::Object Init(Napi::Env env, Napi::Object exports) {
     exports.Set(Napi::String::New(env, "closeWindow"), Napi::Function::New(env, Adrenaline::CloseWindow));
     exports.Set(Napi::String::New(env, "evalWindow"), Napi::Function::New(env, Adrenaline::EvalWindow));
     exports.Set(Napi::String::New(env, "navigateWindow"), Napi::Function::New(env, Adrenaline::NavigateWindow));
+    exports.Set(Napi::String::New(env, "getCompiledFeatures"), Napi::Function::New(env, Adrenaline::GetCompiledFeatures));
     return exports;
 }
 
