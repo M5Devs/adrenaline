@@ -25,6 +25,17 @@ private:
   DISALLOW_COPY_AND_ASSIGN(AdrenalineApp);
 };
 
+#else
+
+// Mock/stub implementation for lightweight build (ADREN_FEATURE_CEF == 0)
+class AdrenalineApp {
+public:
+  AdrenalineApp() = default;
+  ~AdrenalineApp() = default;
+
+  void OnContextInitialized() {}
+};
+
 #endif // ADREN_FEATURE_CEF
 
 #endif // ADRENALINE_CEF_APP_H_
