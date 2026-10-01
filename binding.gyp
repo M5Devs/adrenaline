@@ -1,4 +1,7 @@
 {
+  "variables": {
+    "adren_engine%": "webview"
+  },
   "targets": [
     {
       "target_name": "adrenaline",
@@ -18,7 +21,20 @@
       "cflags_cc!": [ "-fno-exceptions" ],
       "cflags_cc": [ "-std=c++17", "-fexceptions" ],
       "conditions": [
-        ['OS=="linux"', {
+        ["adren_engine=='cef'", {
+          "defines": [
+            "ADREN_FEATURE_CEF=1"
+          ],
+          "sources": [
+            "src/cef/adrenaline_app.cpp",
+            "src/cef/adrenaline_client.cpp"
+          ],
+          "include_dirs": [
+            "<!(node -p \"process.env.CEF_ROOT || 'src/vendor/cef/include'\")",
+            "<!(node -p \"process.env.CEF_ROOT || 'src/vendor/cef'\")"
+          ]
+        }],
+        ["OS=='linux' and adren_engine=='webview'", {
           "cflags": [
             "<!@(pkg-config --cflags gtk+-3.0 webkit2gtk-4.1 2>/dev/null || pkg-config --cflags gtk+-3.0 webkit2gtk-4.0)"
           ],
@@ -29,13 +45,15 @@
             "<!@(pkg-config --libs gtk+-3.0 webkit2gtk-4.1 2>/dev/null || pkg-config --libs gtk+-3.0 webkit2gtk-4.0)"
           ]
         }],
-        ['OS=="mac"', {
+        ["OS=='mac'", {
           "xcode_settings": {
             "CLANG_CXX_LANGUAGE_STANDARD": "c++17",
             "GCC_ENABLE_CPP_EXCEPTIONS": "YES",
             "CLANG_CXX_LIBRARY": "libc++",
             "MACOSX_DEPLOYMENT_TARGET": "10.15"
-          },
+          }
+        }],
+        ["OS=='mac' and adren_engine=='webview'", {
           "link_settings": {
             "libraries": [
               "-framework WebKit",
@@ -43,7 +61,7 @@
             ]
           }
         }],
-        ['OS=="win"', {
+        ["OS=='win'", {
           "msvs_settings": {
             "VCCLCompilerTool": {
               "ExceptionHandling": 1,
