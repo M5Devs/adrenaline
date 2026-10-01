@@ -4,7 +4,8 @@
       "target_name": "adrenaline",
       "sources": [
         "src/main.cpp",
-        "src/window.cpp"
+        "src/window.cpp",
+        "src/dialog.cpp"
       ],
       "include_dirs": [
         "<!@(node -p \"require('node-addon-api').include\")"

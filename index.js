@@ -4,6 +4,7 @@ const app = require('./lib/app');
 const BrowserWindow = require('./lib/browser-window');
 const ipcMain = require('./lib/ipc-main');
 const features = require('./lib/features');
+const dialog = require('./lib/dialog');
 
 class Window extends EventEmitter {
     constructor(options = {}) {
@@ -41,6 +42,7 @@ module.exports = {
     BrowserWindow,
     ipcMain,
     features,
+    dialog,
     ping: native.ping,
     createWindow,
     Window,
