@@ -8,6 +8,59 @@ export interface CompiledFeatures {
   webview: boolean;
 }
 
+export interface FileFilter {
+  name: string;
+  extensions: string[];
+}
+
+export interface OpenDialogOptions {
+  title?: string;
+  defaultPath?: string;
+  buttonLabel?: string;
+  filters?: FileFilter[];
+  properties?: Array<'openFile' | 'openDirectory' | 'multiSelections' | 'showHiddenFiles' | 'createDirectory' | string>;
+}
+
+export interface OpenDialogReturnValue {
+  canceled: boolean;
+  filePaths: string[];
+}
+
+export interface SaveDialogOptions {
+  title?: string;
+  defaultPath?: string;
+  buttonLabel?: string;
+  filters?: FileFilter[];
+  properties?: Array<'showHiddenFiles' | 'createDirectory' | string>;
+}
+
+export interface SaveDialogReturnValue {
+  canceled: boolean;
+  filePath: string;
+}
+
+export interface MessageBoxOptions {
+  type?: 'none' | 'info' | 'error' | 'question' | 'warning';
+  buttons?: string[];
+  defaultId?: number;
+  title?: string;
+  message?: string;
+  detail?: string;
+  checkboxLabel?: string;
+  checkboxChecked?: boolean;
+}
+
+export interface MessageBoxReturnValue {
+  response: number;
+  checkboxChecked: boolean;
+}
+
+export interface Dialog {
+  showOpenDialog(options?: OpenDialogOptions): Promise<OpenDialogReturnValue>;
+  showSaveDialog(options?: SaveDialogOptions): Promise<SaveDialogReturnValue>;
+  showMessageBox(options?: MessageBoxOptions): Promise<MessageBoxReturnValue>;
+}
+
 export interface BrowserWindowOptions {
   width?: number;
   height?: number;
@@ -55,3 +108,4 @@ export const app: App;
 export const BrowserWindow: typeof BrowserWindow;
 export const ipcMain: IpcMain;
 export const features: CompiledFeatures;
+export const dialog: Dialog;
