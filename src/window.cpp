@@ -26,6 +26,9 @@ struct WindowInstance {
     int maxWidth{0};
     int maxHeight{0};
 
+    bool lowEndDeviceMode{true};
+    bool privacyShield{true};
+
     webview::webview* wv{nullptr};
     std::thread th;
     std::atomic<bool> is_running{false};
@@ -65,6 +68,8 @@ Napi::Value CreateWindow(const Napi::CallbackInfo& info) {
     int minHeight = 0;
     int maxWidth = 0;
     int maxHeight = 0;
+    bool lowEndDeviceMode = true;
+    bool privacyShield = true;
 
     Napi::Function ipc_cb;
     bool has_ipc_cb = false;
@@ -102,6 +107,12 @@ Napi::Value CreateWindow(const Napi::CallbackInfo& info) {
         if (opts.Has("maxHeight") && opts.Get("maxHeight").IsNumber()) {
             maxHeight = opts.Get("maxHeight").As<Napi::Number>().Int32Value();
         }
+        if (opts.Has("lowEndDeviceMode") && opts.Get("lowEndDeviceMode").IsBoolean()) {
+            lowEndDeviceMode = opts.Get("lowEndDeviceMode").As<Napi::Boolean>().Value();
+        }
+        if (opts.Has("privacyShield") && opts.Get("privacyShield").IsBoolean()) {
+            privacyShield = opts.Get("privacyShield").As<Napi::Boolean>().Value();
+        }
         if (opts.Has("onIpc") && opts.Get("onIpc").IsFunction()) {
             ipc_cb = opts.Get("onIpc").As<Napi::Function>();
             has_ipc_cb = true;
@@ -126,6 +137,8 @@ Napi::Value CreateWindow(const Napi::CallbackInfo& info) {
     instance->minHeight = minHeight;
     instance->maxWidth = maxWidth;
     instance->maxHeight = maxHeight;
+    instance->lowEndDeviceMode = lowEndDeviceMode;
+    instance->privacyShield = privacyShield;
 
     if (has_ipc_cb) {
         instance->tsfn = Napi::ThreadSafeFunction::New(
@@ -205,7 +218,7 @@ Napi::Value CreateWindow(const Napi::CallbackInfo& info) {
                 }
             }, nullptr);
 
-            wv.init(R"raw(
+            std::string init_script = R"raw(
                 window.adrenaline = window.adrenaline || {};
                 window.adrenaline.send = function(channel, data) { return window.__adrenaline_ipc_send(channel, data); };
                 window.adrenaline._listeners = window.adrenaline._listeners || {};
@@ -234,7 +247,17 @@ Napi::Value CreateWindow(const Napi::CallbackInfo& info) {
                         window.adrenaline.send('__adrenaline_ipc_invoke', { reqId: reqId, channel: channel, data: data });
                     });
                 };
-            )raw");
+            )raw";
+
+            if (instance->privacyShield) {
+                init_script += R"raw(
+                    if (navigator && navigator.sendBeacon) {
+                        navigator.sendBeacon = function() { return true; };
+                    }
+                )raw";
+            }
+
+            wv.init(init_script.c_str());
 
             if (!instance->html.empty()) {
                 wv.set_html(instance->html.c_str());

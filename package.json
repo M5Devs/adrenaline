@@ -14,7 +14,7 @@
   "scripts": {
     "build": "node-gyp rebuild",
     "install": "node-gyp rebuild",
-    "test": "node test/test.js && node test/test_loadfile.js && node test/test_features.js && node test/test_dialog.js && node test/test_cef_architecture.js"
+    "test": "node test/test.js && node test/test_loadfile.js && node test/test_features.js && node test/test_dialog.js && node test/test_cef_architecture.js && node test/test_flags_optimization.js"
   },
   "dependencies": {
     "node-addon-api": "^8.0.0"

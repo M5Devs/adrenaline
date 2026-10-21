@@ -70,6 +70,8 @@ export interface BrowserWindowOptions {
   minHeight?: number;
   maxWidth?: number;
   maxHeight?: number;
+  lowEndDeviceMode?: boolean;
+  privacyShield?: boolean;
   webPreferences?: Record<string, unknown>;
   url?: string;
   html?: string;

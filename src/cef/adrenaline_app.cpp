@@ -11,6 +11,26 @@
 
 AdrenalineApp::AdrenalineApp() {}
 
+void AdrenalineApp::OnBeforeCommandLineProcessing(
+    const CefString& process_type,
+    CefRefPtr<CefCommandLine> command_line) {
+  if (!command_line.get()) {
+    return;
+  }
+
+  // Performance & memory optimization switches
+  command_line->AppendSwitch("enable-low-end-device-mode");
+  command_line->AppendSwitch("no-pings");
+
+  // Privacy & de-googling switches
+  command_line->AppendSwitch("disable-background-networking");
+  command_line->AppendSwitchWithValue("webrtc-ip-handling-policy", "disable_non_proxied_udp");
+
+  // Desktop UI polish switches
+  command_line->AppendSwitch("hide-crashed-bubble");
+  command_line->AppendSwitch("force-dark-mode");
+}
+
 void AdrenalineApp::OnContextInitialized() {
   CEF_REQUIRE_UI_THREAD();
 
