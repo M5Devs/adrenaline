@@ -16,6 +16,10 @@ public:
     return this;
   }
 
+  virtual void OnBeforeCommandLineProcessing(
+      const CefString& process_type,
+      CefRefPtr<CefCommandLine> command_line) OVERRIDE;
+
   // CefBrowserProcessHandler methods:
   virtual void OnContextInitialized() OVERRIDE;
 
@@ -27,12 +31,15 @@ private:
 
 #else
 
+#include <string>
+
 // Mock/stub implementation for lightweight build (ADREN_FEATURE_CEF == 0)
 class AdrenalineApp {
 public:
   AdrenalineApp() = default;
   ~AdrenalineApp() = default;
 
+  void OnBeforeCommandLineProcessing(const std::string& process_type, void* command_line) {}
   void OnContextInitialized() {}
 };
 
