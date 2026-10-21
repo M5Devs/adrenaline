@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Benchmark Head-to-Head App</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Benchmark Workload Application</h1>
+            <div class="stats">
+                <span>IPC Roundtrips: <strong id="ipc-count">0</strong></span>
+                <span>Active FPS: <strong id="fps-count">0</strong></span>
+                <span>Rendered Records: <strong id="record-count">0</strong></span>
+            </div>
+        </header>
+
+        <main>
+            <section class="canvas-section">
+                <h2>60fps Canvas Animation Simulation</h2>
+                <canvas id="anim-canvas" width="600" height="200"></canvas>
+            </section>
+
+            <section class="table-section">
+                <h2>500+ Dynamic Record Dataset</h2>
+                <div class="controls">
+                    <input type="text" id="search-input" placeholder="Search records by name, role, or status..." />
+                </div>
+                <div class="table-container">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>ID</th>
+                                <th>Name</th>
+                                <th>Role</th>
+                                <th>Department</th>
+                                <th>Status</th>
+                                <th>Value</th>
+                            </tr>
+                        </thead>
+                        <tbody id="table-body">
+                            <!-- Populated dynamically by app.js -->
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+        </main>
+    </div>
+    <script src="app.js"></script>
+</body>
+</html>
