@@ -7,37 +7,51 @@
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
-    <div class="container">
-        <header>
-            <h1>Benchmark Workload Application</h1>
-            <div class="stats">
-                <span>IPC Roundtrips: <strong id="ipc-count">0</strong></span>
-                <span>Active FPS: <strong id="fps-count">0</strong></span>
-                <span>Rendered Records: <strong id="record-count">0</strong></span>
+    <div class="app-window">
+        <header class="app-header">
+            <div class="brand">
+                <span class="logo-icon">⚡</span>
+                <h1>Productivity Bench Workload</h1>
+            </div>
+            <div class="metrics-bar">
+                <div class="metric-badge">
+                    <span class="label">IPC Messages:</span>
+                    <span class="value" id="ipc-count">0</span>
+                </div>
+                <div class="metric-badge">
+                    <span class="label">Active Rows:</span>
+                    <span class="value" id="record-count">0</span>
+                </div>
+                <div class="metric-badge">
+                    <span class="label">Last Render:</span>
+                    <span class="value" id="render-time">0ms</span>
+                </div>
             </div>
         </header>
 
-        <main>
-            <section class="canvas-section">
-                <h2>60fps Canvas Animation Simulation</h2>
-                <canvas id="anim-canvas" width="600" height="200"></canvas>
-            </section>
-
-            <section class="table-section">
-                <h2>500+ Dynamic Record Dataset</h2>
-                <div class="controls">
-                    <input type="text" id="search-input" placeholder="Search records by name, role, or status..." />
+        <main class="app-main">
+            <div class="glass-panel controls-panel">
+                <div class="search-box">
+                    <input type="text" id="search-input" placeholder="Search 1,000+ records by name, role, department, or status..." />
                 </div>
-                <div class="table-container">
-                    <table>
+                <div class="action-buttons">
+                    <button id="btn-sort-name" class="btn">Sort by Name</button>
+                    <button id="btn-sort-value" class="btn">Sort by Value</button>
+                    <button id="btn-shuffle" class="btn btn-primary">Shuffle Data</button>
+                </div>
+            </div>
+
+            <div class="glass-panel table-panel">
+                <div class="table-scroll-container">
+                    <table id="data-table">
                         <thead>
                             <tr>
-                                <th>ID</th>
+                                <th># ID</th>
                                 <th>Name</th>
                                 <th>Role</th>
                                 <th>Department</th>
                                 <th>Status</th>
-                                <th>Value</th>
+                                <th>Activity Metric</th>
                             </tr>
                         </thead>
                         <tbody id="table-body">
@@ -45,7 +59,7 @@
                         </tbody>
                     </table>
                 </div>
-            </section>
+            </div>
         </main>
     </div>
     <script src="app.js"></script>

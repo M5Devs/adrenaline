@@ -10,8 +10,8 @@ app.whenReady().then(() => {
     const htmlPath = path.join(__dirname, 'app', 'index.html');
 
     const win = new BrowserWindow({
-        width: 1000,
-        height: 700,
+        width: 1100,
+        height: 750,
         title: 'Adrenaline Head-to-Head Test'
     });
 
@@ -25,11 +25,11 @@ app.whenReady().then(() => {
             console.log(`[Adrenaline] Ready signal received in ${readyTime}ms`);
         }
 
-        // Start 500ms continuous bidirectional IPC ping loop
+        // Start 200ms continuous bidirectional IPC ping loop
         ipcInterval = setInterval(() => {
             ipcSeq++;
-            win.webContents.send('ping-from-main', { seq: ipcSeq });
-        }, 500);
+            win.webContents.send('ping-from-main', { seq: ipcSeq, timestamp: Date.now() });
+        }, 200);
     });
 
     ipcMain.on('pong-from-renderer', (event, data) => {

@@ -100,13 +100,14 @@ function terminateProcessTree(rootPid) {
     }
 }
 
-function getDiskFootprint(targetPath) {
+function getDiskKb(targetPath) {
+    if (!fs.existsSync(targetPath)) return 0;
     try {
         const out = execSync(`du -sk ${targetPath}`, { encoding: 'utf8' });
         const kb = parseInt(out.split(/\s+/)[0], 10);
-        return (kb / 1024).toFixed(2);
+        return isNaN(kb) ? 0 : kb;
     } catch (e) {
-        return 'N/A';
+        return 0;
     }
 }
 
@@ -173,11 +174,23 @@ async function main() {
     console.log('Starting Head-to-Head Empirical Benchmark Suite...');
 
     const rootDir = path.resolve(__dirname, '../../');
-    const adrenalinePath = rootDir;
-    const electronBinaryPath = path.join(rootDir, 'node_modules', 'electron');
 
-    const adrenalineDiskMb = getDiskFootprint(adrenalinePath);
-    const electronDiskMb = getDiskFootprint(electronBinaryPath);
+    // 1. Electron Footprint: Requires bundled Chromium/Node binary distribution in node_modules/electron/dist
+    const electronDistPath = path.join(rootDir, 'node_modules', 'electron', 'dist');
+    const electronDistKb = getDiskKb(electronDistPath);
+    const electronDiskMb = (electronDistKb / 1024).toFixed(2);
+
+    // 2. Adrenaline Footprint: Native C++ Node Addon + JS Runtime Libraries + App Code + Assets
+    const adrPaths = [
+        path.join(rootDir, 'build/Release/adrenaline.node'),
+        path.join(rootDir, 'lib'),
+        path.join(rootDir, 'index.js'),
+        path.join(rootDir, 'package.json'),
+        path.join(rootDir, 'bin'),
+        path.join(rootDir, 'benchmarks/head-to-head/app')
+    ];
+    const adrKb = adrPaths.reduce((acc, p) => acc + getDiskKb(p), 0);
+    const adrenalineDiskMb = (adrKb / 1024).toFixed(2);
 
     // 1. Run Adrenaline
     const adrenalineRunner = path.join(__dirname, 'adrenaline-runner.js');
@@ -208,13 +221,13 @@ function generateReport(adr, ele) {
 
     let md = `# Empirical Head-to-Head Benchmark Report: Adrenaline.js vs Electron\n\n`;
     md += `## Executive Summary\n`;
-    md += `This report compares **Adrenaline.js (WebView-backed Node.js desktop runtime)** directly against standard **Electron** running the exact same complex frontend workload under identical headless execution conditions (\`xvfb-run\`).\n\n`;
+    md += `This report compares **Adrenaline.js (WebView-backed Node.js desktop runtime)** directly against standard **Electron** running the exact same complex frontend productivity workload under identical headless execution conditions (\`xvfb-run\`).\n\n`;
 
     md += `## Workload Specification\n`;
-    md += `Both runtimes executed an identical frontend application (\`benchmarks/head-to-head/app/\`) featuring:\n`;
-    md += `- **Dynamic DOM Load:** Table rendering and live client-side filtering over **500+ records**.\n`;
-    md += `- **Active Canvas Rendering:** Continuous **60fps animated particle system** with particle collision and line rendering.\n`;
-    md += `- **Active Bidirectional IPC:** Background-to-renderer and renderer-to-background messages dispatched **every 500ms**.\n`;
+    md += `Both runtimes executed an identical frontend application (\`benchmarks/head-to-head/app/\`) featuring a realistic desktop productivity suite:\n`;
+    md += `- **Dynamic Productivity Dataset:** 1,000+ live records with continuous search filtering, column sorting, and row mutations.\n`;
+    md += `- **Glassmorphism UI:** Modern backdrop filters, CSS transitions, and sticky headers.\n`;
+    md += `- **Active Bidirectional IPC:** Continuous background-to-renderer and renderer-to-background messages every **200ms**.\n`;
     md += `- **Test Duration:** 10-second continuous active profiling run.\n\n`;
 
     md += `## Head-to-Head Comparison Table\n\n`;
@@ -224,7 +237,7 @@ function generateReport(adr, ele) {
     md += `| **Startup Time to Paint** | ${ele.startupTimeMs} ms | ${adr.startupTimeMs} ms | ${calculateDiff(ele.startupTimeMs, adr.startupTimeMs)} |\n`;
     md += `| **Physical Memory (PSS)** | ${ele.peakPssMb} MB | ${adr.peakPssMb} MB | ${calculateDiff(ele.peakPssMb, adr.peakPssMb)} |\n`;
     md += `| **Peak Resident Memory (RSS)** | ${ele.peakRssMb} MB | ${adr.peakRssMb} MB | ${calculateDiff(ele.peakRssMb, adr.peakRssMb)} |\n`;
-    md += `| **Disk / Bundle Footprint** | ${ele.diskMb} MB | ${adr.diskMb} MB | ${calculateDiff(ele.diskMb, adr.diskMb)} |\n\n`;
+    md += `| **Disk / Runtime Bundle Footprint** | ${ele.diskMb} MB | ${adr.diskMb} MB | ${calculateDiff(ele.diskMb, adr.diskMb)} |\n\n`;
 
     md += `## Process Tree Breakdown\n\n`;
 
@@ -246,10 +259,11 @@ function generateReport(adr, ele) {
 
     md += `## Measurement Methodology\n`;
     md += `1. **Process Tracking:** The benchmark harness monitors process parent-child relationships using \`pgrep\` recursively from the root process PID.\n`;
-    md += `2. **Proportional Set Size (PSS):** Summed directly from \`/proc/[pid]/smaps_rollup\` across all processes in the runtime tree. PSS accounts for shared libraries without double-counting shared OS pages.\n`;
+    md += `2. **Proportional Set Size (PSS):** Summed directly from \`/proc/[pid]/smaps_rollup\` across all processes in the runtime tree. PSS accounts for shared OS libraries without double-counting.\n`;
     md += `3. **Resident Set Size (RSS):** Summed total peak memory resident in RAM.\n`;
     md += `4. **Startup Time:** Precise time elapsed from initial process spawn to renderer initialization and interactive paint acknowledgment (\`app-ready\` signal sent over IPC).\n`;
-    md += `5. **Cleanup:** Complete SIGKILL process tree termination after sampling to guarantee zero leftover background child processes.\n`;
+    md += `5. **Runtime Disk Footprint:** Electron footprint measures its required bundled Chromium/Node runtime distribution (\`node_modules/electron/dist\`). Adrenaline footprint measures the native C++ addon (\`build/Release/adrenaline.node\`), JavaScript libraries (\`lib/\`), and application files.\n`;
+    md += `6. **Cleanup:** Complete SIGKILL process tree termination after sampling to guarantee zero leftover background child processes.\n`;
 
     fs.mkdirSync(path.dirname(reportPath), { recursive: true });
     fs.writeFileSync(reportPath, md, 'utf8');

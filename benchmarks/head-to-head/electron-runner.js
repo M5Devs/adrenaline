@@ -13,8 +13,8 @@ app.whenReady().then(() => {
     const preloadPath = path.join(__dirname, 'preload.js');
 
     const win = new BrowserWindow({
-        width: 1000,
-        height: 700,
+        width: 1100,
+        height: 750,
         title: 'Electron Head-to-Head Test',
         webPreferences: {
             preload: preloadPath,
@@ -36,9 +36,9 @@ app.whenReady().then(() => {
         ipcInterval = setInterval(() => {
             ipcSeq++;
             if (!win.isDestroyed()) {
-                win.webContents.send('ping-from-main', { seq: ipcSeq });
+                win.webContents.send('ping-from-main', { seq: ipcSeq, timestamp: Date.now() });
             }
-        }, 500);
+        }, 200);
     });
 
     ipcMain.on('pong-from-renderer', (event, data) => {
