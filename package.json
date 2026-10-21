@@ -14,12 +14,14 @@
   "scripts": {
     "build": "node-gyp rebuild",
     "install": "node-gyp rebuild",
-    "test": "node test/test.js && node test/test_loadfile.js && node test/test_features.js && node test/test_dialog.js && node test/test_cef_architecture.js"
+    "test": "node test/test.js && node test/test_loadfile.js && node test/test_features.js && node test/test_dialog.js && node test/test_cef_architecture.js",
+    "benchmark:head-to-head": "xvfb-run -a node benchmarks/head-to-head/monitor.js"
   },
   "dependencies": {
     "node-addon-api": "^8.0.0"
   },
   "devDependencies": {
+    "electron": "^45.0.0",
     "node-gyp": "^10.0.0"
   },
   "bin": {
