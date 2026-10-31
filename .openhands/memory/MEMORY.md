@@ -58,3 +58,13 @@ node-addon-api), JS surface in `lib/` + `index.js`/`index.mjs`, types `index.d.t
 - An unrelated project's memory (a browser audio studio, "EchoLab") was previously
   stored in this file; it is preserved in `.openhands/memory/echolab-memory-archive.md`
   and does not apply to this repository.
+
+## Known pre-existing bug: CI `Run unit tests` core dump
+- `.github/workflows/ci.yml` job `build-and-test` fails on `main` itself
+  (run 39660052223 @ 894b94b6, and again on any PR). Every test script prints
+  success, then the process aborts: `realloc(): invalid next size` → `Aborted`
+  (exit 134). Reproduce locally with `xvfb-run -a npm test`.
+- It is heap corruption during native-addon teardown (src/window.cpp / src/main.cpp),
+  NOT a test failure and NOT caused by the benchmark suite (which touches no C++).
+- So a red `build-and-test` check on a JS-only PR is expected; verify the failing
+  step is `Run unit tests` with exit 134 before assuming a regression.
