@@ -18,19 +18,24 @@ const cppContent = fs.readFileSync(cefCppPath, 'utf8');
 assert.ok(headerContent.includes('OnBeforeCommandLineProcessing'), 'header must declare OnBeforeCommandLineProcessing');
 assert.ok(cppContent.includes('OnBeforeCommandLineProcessing'), 'cpp must implement OnBeforeCommandLineProcessing');
 
-// Check required command line switches in CEF cpp
+// Every switch is gated on a compile-time feature macro sourced from
+// adrenaline.config.js (Modular Feature Elimination Engine).
 const requiredSwitches = [
   'enable-low-end-device-mode',
   'no-pings',
   'disable-background-networking',
   'webrtc-ip-handling-policy',
   'disable_non_proxied_udp',
-  'hide-crashed-bubble',
-  'force-dark-mode'
+  'hide-crashed-bubble'
 ];
 
 requiredSwitches.forEach((sw) => {
   assert.ok(cppContent.includes(sw), `adrenaline_app.cpp must contain switch/value '${sw}'`);
+});
+
+// Feature-elimination gates must be present.
+['ADREN_FEATURE_WEBRTC', 'ADREN_FEATURE_CLEAN_PRIVACY', 'ADREN_FEATURE_PDF'].forEach((macro) => {
+  assert.ok(cppContent.includes(macro), `adrenaline_app.cpp must gate switches on ${macro}`);
 });
 
 assert.strictEqual(headerContent.includes('// TODO'), false, 'adrenaline_app.h must contain zero TODOs');

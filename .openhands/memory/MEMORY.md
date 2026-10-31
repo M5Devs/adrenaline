@@ -59,12 +59,40 @@ node-addon-api), JS surface in `lib/` + `index.js`/`index.mjs`, types `index.d.t
   stored in this file; it is preserved in `.openhands/memory/echolab-memory-archive.md`
   and does not apply to this repository.
 
-## Known pre-existing bug: CI `Run unit tests` core dump
-- `.github/workflows/ci.yml` job `build-and-test` fails on `main` itself
-  (run 39660052223 @ 894b94b6, and again on any PR). Every test script prints
-  success, then the process aborts: `realloc(): invalid next size` → `Aborted`
-  (exit 134). Reproduce locally with `xvfb-run -a npm test`.
-- It is heap corruption during native-addon teardown (src/window.cpp / src/main.cpp),
-  NOT a test failure and NOT caused by the benchmark suite (which touches no C++).
-- So a red `build-and-test` check on a JS-only PR is expected; verify the failing
-  step is `Run unit tests` with exit 134 before assuming a regression.
+## Fixed: teardown core dump / SIGSEGV (exit 139/134) after `npm test`
+- Symptom: every test prints success, then the process aborts at exit
+  (`realloc(): invalid next size` / SIGSEGV in JSC `StringImpl::destroy`), only
+  under `xvfb-run -a` (needs a real X display). `test_flags_optimization.js` was
+  the worst offender (~7–12/40), the full suite ~3/20.
+- **Definitive root cause (2026-10-31):** `env.AddCleanupHook(...)` — i.e.
+  `napi_add_env_cleanup_hook` — **does not run when the process ends via
+  `process.exit()`**, and every test calls `process.exit(0)`. So `ShutdownWindows()`
+  and every teardown strategy layered on it was a **no-op**; WebKit/JSC teardown
+  raced node's own exit. (Proved by writing a file from inside the hook: never
+  fired. Timing also proved it: a requested 2500 ms shutdown sleep took 0.16 s.)
+- **Fix:** export native `shutdown()` and call it from a JS `process.on('exit')`
+  hook in `index.js` (node's own 'exit' hook *does* run at `process.exit()` and
+  blocks until the callback returns). `ShutdownWindows()` drains the engine loop
+  (`RunOnEngine(DrainEngine(500))`) then signals+joins the engine thread.
+  - Webviews still open at exit are **not** destroyed — tearing one down at exit
+    aborts 100% of the time even after draining; the OS reclaims it.
+  - `close()` **parks** the closed `WindowInstance` in `closed_windows()` instead
+    of destroying it; destroying in `close()` also aborts at exit (test.js /
+    test_loadfile.js close a loaded window). Parking is the only stable choice.
+- Result: flags 0/80, delay-0 0/80, 40× open/close 0/20, full suite 0/10 (webview)
+  and 0/5 (cef).
+- The earlier `XInitThreads()` + `g_engine_init_mutex` change (below) is still
+  correct and needed for concurrent GTK init, but it was **not** the exit crash's
+  root cause — the skipped cleanup hook was.
+- Diagnostic note: stderr from a fatal path is not flushed; write diagnostics to a
+  file. There is no gdb/valgrind/strace in this image (only `addr2line`).
+
+## Also fixed: concurrent GTK init (kept, separate from the exit crash)
+- Each `BrowserWindow` runs its own GTK main loop on a dedicated thread, so
+  `gtk_init()` / `webkit_web_view_new()` could run **concurrently** against a shared
+  GMainContext with a non-thread-safe libX11 → heap corruption.
+- Fix (src/main.cpp, src/window.cpp, binding.gyp): `XInitThreads()` once in module
+  `Init` (link `-lX11`) and a global `g_engine_init_mutex` held across
+  `webview::webview` ctor → `init()`. This is correct and needed, but it was not the
+  exit-139 root cause (that was the skipped N-API cleanup hook, above).
+

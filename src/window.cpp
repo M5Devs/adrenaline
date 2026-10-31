@@ -9,6 +9,11 @@
 #include <atomic>
 #include <string>
 #include <iostream>
+#include <functional>
+#include <future>
+#include <deque>
+#include <chrono>
+#include <vector>
 
 namespace Adrenaline {
 
@@ -29,9 +34,9 @@ struct WindowInstance {
     bool lowEndDeviceMode{true};
     bool privacyShield{true};
 
-    webview::webview* wv{nullptr};
-    std::thread th;
-    std::atomic<bool> is_running{false};
+    // Owned by the engine thread and only ever touched from it. The JS thread
+    // interacts with it exclusively by posting tasks to the engine queue.
+    std::shared_ptr<webview::webview> wv;
 
     Napi::ThreadSafeFunction tsfn;
     bool has_tsfn{false};
@@ -39,8 +44,121 @@ struct WindowInstance {
 };
 
 static std::atomic<int> g_next_window_id{1};
-static std::unordered_map<int, std::shared_ptr<WindowInstance>> g_windows;
+
+// The registry is heap-allocated so it is never destroyed by a static
+// destructor at process exit; teardown happens explicitly via shutdown().
+static std::unordered_map<int, std::shared_ptr<WindowInstance>>& windows_map() {
+    static auto* m = new std::unordered_map<int, std::shared_ptr<WindowInstance>>();
+    return *m;
+}
 static std::mutex g_windows_mutex;
+
+// Closed windows are parked here rather than destroyed: WebKit aborts when a
+// webview is torn down, and the OS reclaims the memory at process exit.
+static std::vector<std::shared_ptr<WindowInstance>>& closed_windows() {
+    static auto* v = new std::vector<std::shared_ptr<WindowInstance>>();
+    return *v;
+}
+static std::mutex g_closed_mutex;
+
+// GTK/WebKit are single-threaded: every gtk_*/webkit_* call, and iteration of
+// the default GMainContext, must happen on one thread. Running a main loop per
+// window corrupts the heap, so all windows live on one dedicated engine thread
+// and the JS thread only ever posts work to it.
+namespace {
+struct EngineState {
+    std::thread thread;
+    std::mutex mutex;
+    std::deque<std::function<void()>> tasks;
+    bool started{false};
+    bool stop{false};
+};
+
+// Intentionally leaked: the engine thread must never be torn down by a static
+// destructor at process exit (a joinable std::thread would call
+// std::terminate, and destroying GTK state races with the still-running thread).
+// The normal teardown path joins the thread via ShutdownWindows(); if the
+// process exits without it, the OS reclaims everything.
+EngineState& engine() {
+    static EngineState* state = new EngineState();
+    return *state;
+}
+
+void EngineThreadMain() {
+    GMainContext* ctx = g_main_context_default();
+    for (;;) {
+        for (;;) {
+            std::function<void()> task;
+            {
+                std::lock_guard<std::mutex> lock(engine().mutex);
+                if (engine().tasks.empty()) {
+                    break;
+                }
+                task = std::move(engine().tasks.front());
+                engine().tasks.pop_front();
+            }
+            task();
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(engine().mutex);
+            if (engine().stop && engine().tasks.empty()) {
+                break;
+            }
+        }
+
+        // Block until the next GTK/WebKit event or a wakeup from a new task.
+        g_main_context_iteration(ctx, TRUE);
+    }
+}
+
+void EnsureEngineThread() {
+    std::lock_guard<std::mutex> lock(engine().mutex);
+    if (engine().started) {
+        return;
+    }
+    engine().started = true;
+    engine().thread = std::thread(EngineThreadMain);
+}
+
+void PushEngineTask(std::function<void()> fn) {
+    {
+        std::lock_guard<std::mutex> lock(engine().mutex);
+        engine().tasks.push_back(std::move(fn));
+    }
+    g_main_context_wakeup(g_main_context_default());
+}
+
+// Runs fn on the engine thread and waits for it to finish.
+void RunOnEngine(const std::function<void()>& fn) {
+    EnsureEngineThread();
+    std::promise<void> done;
+    std::future<void> finished = done.get_future();
+    PushEngineTask([&fn, &done]() {
+        try {
+            fn();
+        } catch (...) {
+        }
+        done.set_value();
+    });
+    finished.wait();
+}
+
+// Let pending GTK/WebKit work settle before tearing a webview down. Destroying a
+// webview while WebKit is still loading leaves JSC state that aborts during
+// process exit, so pump the loop until it goes quiet (or the budget expires).
+void DrainEngine(int max_ms) {
+    GMainContext* ctx = g_main_context_default();
+    auto deadline = std::chrono::steady_clock::now() +
+                    std::chrono::milliseconds(max_ms);
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (!g_main_context_iteration(ctx, FALSE)) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+    }
+}
+} // namespace
+
 
 Napi::Value GetCompiledFeatures(const Napi::CallbackInfo& info) {
     Napi::Env env = info.Env();
@@ -49,6 +167,8 @@ Napi::Value GetCompiledFeatures(const Napi::CallbackInfo& info) {
     feats.Set("devtools", Napi::Boolean::New(env, ADREN_FEATURE_DEVTOOLS != 0));
     feats.Set("localFiles", Napi::Boolean::New(env, ADREN_FEATURE_LOCAL_FILES != 0));
     feats.Set("pdf", Napi::Boolean::New(env, ADREN_FEATURE_PDF != 0));
+    feats.Set("webrtc", Napi::Boolean::New(env, ADREN_FEATURE_WEBRTC != 0));
+    feats.Set("cleanPrivacy", Napi::Boolean::New(env, ADREN_FEATURE_CLEAN_PRIVACY != 0));
     feats.Set("cef", Napi::Boolean::New(env, ADREN_FEATURE_CEF != 0));
     feats.Set("webview", Napi::Boolean::New(env, ADREN_FEATURE_WEBVIEW != 0));
 
@@ -153,28 +273,31 @@ Napi::Value CreateWindow(const Napi::CallbackInfo& info) {
 
     {
         std::lock_guard<std::mutex> lock(g_windows_mutex);
-        g_windows[window_id] = instance;
+        windows_map()[window_id] = instance;
     }
 
-    instance->th = std::thread([instance]() {
+    // The webview is created on the shared engine thread; the JS thread only
+    // posts this setup task and returns the window id immediately.
+    EnsureEngineThread();
+    PushEngineTask([instance]() {
         try {
             bool debug_flag = false;
 #if ADREN_FEATURE_DEVTOOLS
             debug_flag = true;
 #endif
-            webview::webview wv(debug_flag, nullptr);
-            wv.set_title(instance->title.c_str());
+            auto wv = std::make_shared<webview::webview>(debug_flag, nullptr);
+            wv->set_title(instance->title.c_str());
 
             webview_hint_t hint = instance->resizable ? WEBVIEW_HINT_NONE : WEBVIEW_HINT_FIXED;
-            wv.set_size(instance->width, instance->height, hint);
+            wv->set_size(instance->width, instance->height, hint);
             if (instance->minWidth > 0 || instance->minHeight > 0) {
-                wv.set_size(instance->minWidth, instance->minHeight, WEBVIEW_HINT_MIN);
+                wv->set_size(instance->minWidth, instance->minHeight, WEBVIEW_HINT_MIN);
             }
             if (instance->maxWidth > 0 || instance->maxHeight > 0) {
-                wv.set_size(instance->maxWidth, instance->maxHeight, WEBVIEW_HINT_MAX);
+                wv->set_size(instance->maxWidth, instance->maxHeight, WEBVIEW_HINT_MAX);
             }
 
-            wv.bind("__adrenaline_ipc_send", [instance](const std::string& seq, const std::string& req, void* /*arg*/) {
+            wv->bind("__adrenaline_ipc_send", [instance](const std::string& seq, const std::string& req, void* /*arg*/) {
                 if (instance->wv) {
                     instance->wv->resolve(seq, 0, "null");
                 }
@@ -257,31 +380,21 @@ Napi::Value CreateWindow(const Napi::CallbackInfo& info) {
                 )raw";
             }
 
-            wv.init(init_script.c_str());
+            wv->init(init_script.c_str());
 
             if (!instance->html.empty()) {
-                wv.set_html(instance->html.c_str());
+                wv->set_html(instance->html.c_str());
             } else if (!instance->url.empty()) {
-                wv.navigate(instance->url.c_str());
+                wv->navigate(instance->url.c_str());
             }
 
-            instance->wv = &wv;
-            instance->is_running = true;
-            wv.run();
-            instance->is_running = false;
-            instance->wv = nullptr;
+            instance->wv = std::move(wv);
         } catch (const std::exception& e) {
             std::cerr << "Adrenaline Window Exception: " << e.what() << std::endl;
-            instance->is_running = false;
-            instance->wv = nullptr;
+            instance->wv.reset();
         } catch (...) {
             std::cerr << "Adrenaline Window Unknown Exception" << std::endl;
-            instance->is_running = false;
-            instance->wv = nullptr;
-        }
-
-        if (instance->has_tsfn && !instance->tsfn_released.exchange(true)) {
-            instance->tsfn.Release();
+            instance->wv.reset();
         }
     });
 
@@ -301,26 +414,23 @@ Napi::Value CloseWindow(const Napi::CallbackInfo& info) {
 
     {
         std::lock_guard<std::mutex> lock(g_windows_mutex);
-        auto it = g_windows.find(window_id);
-        if (it != g_windows.end()) {
+        auto it = windows_map().find(window_id);
+        if (it != windows_map().end()) {
             instance = it->second;
-            g_windows.erase(it);
+            windows_map().erase(it);
         }
     }
 
     if (instance) {
-        if (instance->wv) {
-            instance->wv->dispatch([instance]() {
-                if (instance->wv) {
-                    instance->wv->terminate();
-                }
-            });
-        }
         if (instance->has_tsfn && !instance->tsfn_released.exchange(true)) {
             instance->tsfn.Release();
         }
-        if (instance->th.joinable()) {
-            instance->th.join();
+        // WebKit aborts when a webview is torn down, even after draining, so a
+        // closed window's instance is parked here instead of destroyed. The OS
+        // reclaims it at process exit; this keeps close() crash-free.
+        {
+            std::lock_guard<std::mutex> lock(g_closed_mutex);
+            closed_windows().push_back(instance);
         }
         return Napi::Boolean::New(env, true);
     }
@@ -342,22 +452,19 @@ Napi::Value EvalWindow(const Napi::CallbackInfo& info) {
     std::shared_ptr<WindowInstance> instance;
     {
         std::lock_guard<std::mutex> lock(g_windows_mutex);
-        auto it = g_windows.find(window_id);
-        if (it != g_windows.end()) {
+        auto it = windows_map().find(window_id);
+        if (it != windows_map().end()) {
             instance = it->second;
         }
     }
 
     if (instance) {
-        if (instance->wv) {
-            std::string script_copy = script;
-            instance->wv->dispatch([instance, script_copy]() {
-                if (instance->wv) {
-                    instance->wv->eval(script_copy);
-                }
-            });
-            return Napi::Boolean::New(env, true);
-        }
+        RunOnEngine([instance, script]() {
+            if (instance->wv) {
+                instance->wv->eval(script);
+            }
+        });
+        return Napi::Boolean::New(env, true);
     }
 
     return Napi::Boolean::New(env, false);
@@ -377,27 +484,53 @@ Napi::Value NavigateWindow(const Napi::CallbackInfo& info) {
     std::shared_ptr<WindowInstance> instance;
     {
         std::lock_guard<std::mutex> lock(g_windows_mutex);
-        auto it = g_windows.find(window_id);
-        if (it != g_windows.end()) {
+        auto it = windows_map().find(window_id);
+        if (it != windows_map().end()) {
             instance = it->second;
         }
     }
 
     if (instance) {
         instance->url = url;
-        if (instance->wv) {
-            std::string url_copy = url;
-            instance->wv->dispatch([instance, url_copy]() {
-                if (instance->wv) {
-                    instance->wv->navigate(url_copy);
-                }
-            });
-            return Napi::Boolean::New(env, true);
-        }
+        RunOnEngine([instance, url]() {
+            if (instance->wv) {
+                instance->wv->navigate(url);
+            }
+        });
         return Napi::Boolean::New(env, true);
     }
 
     return Napi::Boolean::New(env, false);
+}
+
+Napi::Value ShutdownCallback(const Napi::CallbackInfo& info) {
+    Napi::Env env = info.Env();
+    ShutdownWindows();
+    return env.Undefined();
+}
+
+void ShutdownWindows() {
+    if (!engine().started) {
+        return;
+    }
+
+    // Runs from the JS process 'exit' hook (index.js), which blocks until it
+    // returns. Exiting while WebKit is still loading leaves JSC state that
+    // segfaults during node's own teardown, so let pending loads settle first.
+    // Windows still open here are deliberately not destroyed: tearing a webview
+    // down at exit aborts even after draining, and the OS reclaims it anyway.
+    RunOnEngine([]() { DrainEngine(500); });
+
+    // Stop and join the engine thread so it cannot outlive the process.
+    {
+        std::lock_guard<std::mutex> lock(engine().mutex);
+        engine().stop = true;
+    }
+    g_main_context_wakeup(g_main_context_default());
+    if (engine().thread.joinable()) {
+        engine().thread.join();
+    }
+    engine().started = false;
 }
 
 } // namespace Adrenaline

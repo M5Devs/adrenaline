@@ -18,41 +18,42 @@ void AdrenalineApp::OnBeforeCommandLineProcessing(
     return;
   }
 
-  // Performance & memory optimization switches
+  // Modular Feature Elimination Engine: switches are compiled in only when the
+  // corresponding module is requested in adrenaline.config.js.
+#if ADREN_FEATURE_CLEAN_PRIVACY
+  // Ungoogled / performance optimizations.
   command_line->AppendSwitch("enable-low-end-device-mode");
   command_line->AppendSwitch("no-pings");
-
-  // Privacy & de-googling switches
   command_line->AppendSwitch("disable-background-networking");
-  command_line->AppendSwitchWithValue("webrtc-ip-handling-policy", "disable_non_proxied_udp");
-
-  // Desktop UI polish switches
   command_line->AppendSwitch("hide-crashed-bubble");
-  command_line->AppendSwitch("force-dark-mode");
+#endif
+
+#if ADREN_FEATURE_WEBRTC == 0
+  // WebRTC physically disabled and isolated onto non-proxied UDP only.
+  command_line->AppendSwitch("disable-webrtc");
+  command_line->AppendSwitchWithValue("webrtc-ip-handling-policy", "disable_non_proxied_udp");
+#endif
+
+#if ADREN_FEATURE_PDF == 0
+  command_line->AppendSwitch("disable-pdf-extension");
+#endif
 }
 
 void AdrenalineApp::OnContextInitialized() {
   CEF_REQUIRE_UI_THREAD();
 
-  // Configure CefWindowInfo for platform-specific window setup
-  CefWindowInfo window_info;
-#if defined(OS_WIN)
-  window_info.SetAsPopup(NULL, "Adrenaline Browser");
-#elif defined(OS_LINUX)
-  window_info.SetAsPopup(0, "Adrenaline Browser");
-#endif
-
-  // Configure CefBrowserSettings
+  // Modern CEF (>= 120) creates top-level browsers through the Views API
+  // rather than the legacy CefWindowInfo::SetAsPopup path.
   CefBrowserSettings browser_settings;
 
-  // Instantiate AdrenalineClient handler
   CefRefPtr<AdrenalineClient> handler(new AdrenalineClient());
 
-  // Designated initial URL
-  std::string url = "https://google.com";
+  CefRefPtr<CefBrowserView> browser_view = CefBrowserView::CreateBrowserView(
+      handler, "https://google.com", browser_settings, nullptr, nullptr, nullptr);
 
-  // Create initial browser host
-  CefBrowserHost::CreateBrowser(window_info, handler, url, browser_settings, nullptr, nullptr);
+  CefRefPtr<CefWindow> window = CefWindow::CreateTopLevelWindow(nullptr);
+  window->AddChildView(browser_view);
+  window->Show();
 }
 
 #endif // ADREN_FEATURE_CEF
