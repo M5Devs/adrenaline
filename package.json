@@ -14,7 +14,8 @@
   "scripts": {
     "build": "node-gyp rebuild",
     "install": "node-gyp rebuild",
-    "test": "node test/test.js && node test/test_loadfile.js && node test/test_features.js && node test/test_dialog.js && node test/test_cef_architecture.js && node test/test_flags_optimization.js"
+    "test": "node test/test.js && node test/test_loadfile.js && node test/test_features.js && node test/test_dialog.js && node test/test_cef_architecture.js && node test/test_flags_optimization.js",
+    "benchmark": "node benchmarks/stress-suite/run.js && node benchmarks/stress-suite/report.js"
   },
   "dependencies": {
     "node-addon-api": "^8.0.0"
