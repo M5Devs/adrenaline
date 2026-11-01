@@ -12,9 +12,11 @@
     }
   },
   "scripts": {
-    "build": "node-gyp rebuild",
-    "install": "node-gyp rebuild",
-    "test": "node test/test.js && node test/test_loadfile.js && node test/test_features.js && node test/test_dialog.js && node test/test_cef_architecture.js && node test/test_flags_optimization.js",
+    "build": "node scripts/build.js",
+    "install": "node scripts/build.js",
+    "setup:cef": "node scripts/setup-cef.js",
+    "strip:runtime": "node scripts/strip-runtime.js",
+    "test": "node test/test.js && node test/test_loadfile.js && node test/test_features.js && node test/test_dialog.js && node test/test_cef_architecture.js && node test/test_flags_optimization.js && node test/test_config_resolver.js && node test/test_setup_cef.js && node test/test_build_engine.js",
     "benchmark": "node benchmarks/stress-suite/run.js && node benchmarks/stress-suite/report.js"
   },
   "dependencies": {

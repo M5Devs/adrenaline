@@ -4,8 +4,15 @@ export interface CompiledFeatures {
   devtools: boolean;
   localFiles: boolean;
   pdf: boolean;
+  webrtc: boolean;
+  cleanPrivacy: boolean;
   cef: boolean;
   webview: boolean;
+  config: {
+    engine: string;
+    modules: Record<string, boolean>;
+    configFile: string | null;
+  };
 }
 
 export interface FileFilter {

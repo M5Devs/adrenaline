@@ -1,7 +1,8 @@
 #ifndef ADRENALINE_FEATURES_H
 #define ADRENALINE_FEATURES_H
 
-// Centralized Feature Flags with sensible defaults for standard build
+// Centralized Feature Flags. Defaults match `adrenaline.config.js`; the build
+// overrides them with -D flags resolved by lib/config-resolver.js.
 #ifndef ADREN_FEATURE_DEVTOOLS
 #define ADREN_FEATURE_DEVTOOLS 1
 #endif
@@ -12,6 +13,14 @@
 
 #ifndef ADREN_FEATURE_PDF
 #define ADREN_FEATURE_PDF 0
+#endif
+
+#ifndef ADREN_FEATURE_WEBRTC
+#define ADREN_FEATURE_WEBRTC 1
+#endif
+
+#ifndef ADREN_FEATURE_CLEAN_PRIVACY
+#define ADREN_FEATURE_CLEAN_PRIVACY 0
 #endif
 
 #ifndef ADREN_FEATURE_CEF

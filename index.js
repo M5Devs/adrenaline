@@ -6,6 +6,17 @@ const ipcMain = require('./lib/ipc-main');
 const features = require('./lib/features');
 const dialog = require('./lib/dialog');
 
+// N-API env cleanup hooks are skipped when the process ends via process.exit(),
+// which is how the tests (and many apps) terminate. Node's own 'exit' hook does
+// run, so drive the native teardown from there to avoid the WebKit/JSC crash.
+process.on('exit', () => {
+    try {
+        native.shutdown();
+    } catch (_) {
+        // Shutting down must never mask the real exit code.
+    }
+});
+
 class Window extends EventEmitter {
     constructor(options = {}) {
         super();
