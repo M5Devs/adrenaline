@@ -6,7 +6,7 @@
 [![npm version](https://img.shields.io/npm/v/adrenaline-js.svg)](https://www.npmjs.com/package/adrenaline-js)
 [![Node.js](https://img.shields.io/badge/node-%3E%3D16.0.0-brightgreen.svg)](https://nodejs.org/)
 
-Adrenaline.js is an ultra-lightweight, high-performance desktop application framework for Node.js developers. By decoupling your app from Chromium bloat and leveraging native OS system engines with compile-time modularity, Adrenaline delivers blazing-fast desktop applications with tiny bundle sizes and minimal memory footprint.
+Adrenaline.js is an ultra-lightweight, high-performance desktop application framework for Node.js developers. By decoupling your app from Chromium bloat and offering both native OS webviews and a pruned, modular Chromium (CEF) engine, Adrenaline delivers blazing-fast desktop applications with tiny bundle sizes and minimal memory footprint.
 
 > *"Why not Tauri? Tauri is brilliant, but writing backend logic shouldn't require learning Rust and fighting the borrow checker. Adrenaline gives you the same lightweight native webviews using 100% Node.js and the full npm ecosystem you already know."*
 
@@ -14,11 +14,12 @@ Adrenaline.js is an ultra-lightweight, high-performance desktop application fram
 
 ## ⚡ Key Features
 
-- **Tiny Bundle & Minimal Footprint:** Eliminate 150MB+ Chromium bloat. Shipped runtimes start as small as ~5-10MB with ultra-low baseline RAM.
+- **Dual-Engine Architecture (WebView & Pruned CEF):** Choose between an ultra-lightweight system webview (~5-10MB) or a 100% consistent, de-googled Chromium Embedded Framework (CEF) engine with compile-time physical bloat stripping.
 - **Zero Rust / Go Barrier:** Built 100% for JavaScript and Node.js developers. Use your favorite npm packages natively without bridging or learning a new language.
 - **Drop-in Electron-Compatible API:** Zero learning curve. Code with familiar abstractions including `app`, `BrowserWindow`, `ipcMain`, and native `dialog`.
 - **Native OS Dialogs Module:** Non-blocking platform file pickers, save dialogs, and message boxes (`dialog.showOpenDialog`, `dialog.showSaveDialog`, `showMessageBox`) powered by native Win32, Cocoa, and GTK.
-- **Modular Native Architecture (`features.h`):** Compile-time tree-shaking allows excluding unused browser capabilities (PDF, WebRTC, DevTools) directly from the native binary.
+- **Modular Stripping Engine (`adrenaline.config.js`):** Physical compile-time tree-shaking purges unused components (PDF, WebRTC, DevTools, redundant locales) directly from the disk bundle.
+- **Zero-Telemetry by Default:** Curated ungoogled-chromium optimization flags enforce low-memory device caching, disable background networking pings, and block WebRTC IP leaks.
 - **Full TypeScript & Dual ESM/CJS Support:** First-class TypeScript declarations (`index.d.ts`) alongside simultaneous support for `import` (ESM) and `require` (CommonJS).
 - **Sub-Millisecond Multithreaded IPC:** Direct non-blocking communication between the frontend and the Node.js event loop using `Napi::ThreadSafeFunction` (TSFN).
 - **Built-in CLI & Scaffolder:** Rapid project bootstrapping with `npx adrenaline-js init` and `adrenaline dev`.
@@ -45,48 +46,43 @@ npx adrenaline dev
 
 ---
 
-## 📊 Comparison: Adrenaline vs Electron vs Tauri
-
-| Feature | **Adrenaline.js** ⚡ | **Electron** ⚛️ | **Tauri** 🦀 |
-| :--- | :--- | :--- | :--- |
-| **Language / Runtime** | **Node.js / JavaScript** | Node.js / JavaScript | Rust / Web view |
-| **App Bundle Size** | **~5 – 10 MB** | ~150 MB+ | ~5 – 10 MB |
-| **Peak Stress Memory (PSS)** | **~505 MB (-31.6%)** | ~739 MB | ~480 MB |
-| **Backend Language** | **JavaScript / Node.js** | JavaScript / Node.js | Rust |
-| **Learning Curve** | **Zero (Electron API)** | Easy | High (Requires Rust) |
-| **npm Ecosystem** | **Full Native Support** | Full Native Support | Limited (Requires bridges) |
-| **Rendering Engine** | **Native OS Webview / Modular CEF** | Bundled Chromium | System Native Webview |
-
----
-
-## 🔬 Empirical Stress Benchmark (30s Sustained Load)
-
-Tested on identical workloads under headless execution: 10,000-record virtualized DOM mutations, 100 JSON IPC packets/sec, and 2 concurrent SHA-256 worker threads.
-
-| Metric | Electron (v45 Baseline) | Adrenaline.js (v0.2.0) | Delta |
-| :--- | :--- | :--- | :--- |
-| **Peak Stress Memory (PSS)** | 739.5 MB | **505.6 MB** | **-31.6% (234 MB saved)** |
-| **Peak Private Memory** | 606.9 MB | **354.6 MB** | **-41.6% (252 MB saved)** |
-| **Total Shipped Runtime Size** | 273.7 MB | **121.5 MB** | **-55.6% smaller** |
-| **IPC Packet Loss** | 0 unacknowledged | **0 unacknowledged** | **100% Reliable** |
-
-*Full methodology, profiler harness, and raw sample traces available in `benchmarks/STRESS_TEST.md`.*
-
----
-
 ## 👑 The Royal Rumble — 5-Way Runtime Showdown
 
-The same harness runs five desktop runtimes through the identical heavy
-workload, sequentially and headless: **Electron**, **NW.js**, **Neutralinojs**,
-**Adrenaline.js (WebView)** and **Adrenaline.js (pruned CEF)**.
+An empirical, headless benchmark (`xvfb-run -a`) running five JavaScript desktop runtimes through an identical heavy workload for 30 seconds each: **10,000-record virtualized DOM mutations**, **100 JSON IPC packets/sec**, and **2 concurrent SHA-256 CPU worker threads**.
 
-```bash
-node benchmarks/stress-suite/run.js      # 30s per runtime, all five
-node benchmarks/stress-suite/report.js   # regenerate the report
+### Master Comparison Matrix
+
+| Metric | Electron (v45) | NW.js | Neutralinojs | Adrenaline (WebView) | Adrenaline (CEF) | Winner 🏆 |
+| :--- | ---: | ---: | ---: | ---: | ---: | :--- |
+| **Startup to First Paint** | 394 ms | 567 ms | 530 ms | 509 ms | **382 ms** | **Adrenaline (CEF)** 🥇 |
+| **Peak Stress Memory (PSS)** | 717.3 MB | 924.6 MB | 486.4 MB | 496.8 MB | **439.4 MB** | **Adrenaline (CEF)** 🥇 |
+| **Peak Private Memory** | 565.1 MB | 732.7 MB | **344.2 MB** | 346.3 MB | 356.6 MB | **Neutralinojs** |
+| **Total Shipped Payload** | 273.8 MB | 510.8 MB | 123.6 MB | **121.1 MB** | 620.0 MB | **Adrenaline (WebView)** 🥇 |
+| **Process Count (Task Manager)** | 11 procs | 14 procs | 10 procs | 8 procs | **6 procs** | **Adrenaline (CEF)** 🥇 |
+| **Real Node.js / npm Support** | Yes | Yes | **No** (custom) | **Yes** | **Yes** | — |
+
+> **Key Takeaway:** Adrenaline (CEF) held the lowest memory under peak stress (**-38.7% vs Electron**, saving 278 MB RAM) and achieved the fastest cold startup, while Adrenaline (WebView) shipped the smallest uncompressed distribution payload.
+
+*Full methodology, raw 350KB profiler trace, and process-by-process breakdowns available in `benchmarks/ROYAL_RUMBLE_SHOWDOWN.md`.*
+
+---
+
+## ⚙️ Configuration & Module Stripping (`adrenaline.config.js`)
+
+Adrenaline allows developers to physically eliminate unused features from the final distribution:
+
+```javascript
+// adrenaline.config.js
+module.exports = {
+  engine: 'cef', // 'webview' (lightweight) or 'cef' (Chromium)
+  modules: {
+    devtools: false,   // Physically deletes devtools resource paks
+    webrtc: false,     // Clamps down WebRTC & prevents IP leaks
+    pdf: false,        // Strips PDF support
+    cleanPrivacy: true // Injects aggressive low-end device & ungoogled flags
+  }
+};
 ```
-
-*Full matrix, per-process breakdowns, and architectural analysis in
-`benchmarks/ROYAL_RUMBLE_SHOWDOWN.md`.*
 
 ---
 
@@ -163,4 +159,4 @@ Adrenaline comes with a built-in CLI tool for seamless developer experience:
 
 ## 📄 License
 
-This project is licensed under the [MIT License](LICENSE)
+This project is licensed under the [MIT License](LICENSE).
