@@ -2,27 +2,62 @@
 
 #if ADREN_FEATURE_CEF
 
-#include <sstream>
 #include <string>
+#include <utility>
 
-#include "include/base/cef_callback.h"
 #include "include/cef_app.h"
 #include "include/cef_parser.h"
-#include "include/views/cef_browser_view.h"
-#include "include/views/cef_window.h"
-#include "include/wrapper/cef_closure_task.h"
+#include "include/cef_process_message.h"
+#include "include/cef_values.h"
 #include "include/wrapper/cef_helpers.h"
 
-AdrenalineClient::AdrenalineClient()
-    : is_closing_(false), is_ready_(false), is_loaded_(false), current_title_("") {}
+#include "adrenaline_app.h"
+
+AdrenalineClient::AdrenalineClient(
+    std::function<void(const std::string&, const std::string&)> on_ipc,
+    std::string initial_url)
+    : is_closing_(false),
+      is_ready_(false),
+      is_loaded_(false),
+      current_title_(""),
+      initial_url_(std::move(initial_url)),
+      on_ipc_(std::move(on_ipc)) {}
 
 AdrenalineClient::~AdrenalineClient() {}
+
+bool AdrenalineClient::OnProcessMessageReceived(CefRefPtr<CefBrowser> /*browser*/,
+                                                CefRefPtr<CefFrame> /*frame*/,
+                                                CefProcessId source_process,
+                                                CefRefPtr<CefProcessMessage> message) {
+  CEF_REQUIRE_UI_THREAD();
+
+  if (source_process != PID_RENDERER || !message.get()) {
+    return false;
+  }
+  if (message->GetName() != kAdrenalineIpcMessage) {
+    return false;
+  }
+
+  CefRefPtr<CefListValue> args = message->GetArgumentList();
+  if (!args.get() || args->GetSize() < 2) {
+    return true;
+  }
+  if (on_ipc_) {
+    on_ipc_(args->GetString(0).ToString(), args->GetString(1).ToString());
+  }
+  return true;
+}
 
 void AdrenalineClient::OnAfterCreated(CefRefPtr<CefBrowser> browser) {
   CEF_REQUIRE_UI_THREAD();
 
   // Store the active browser reference
   browser_ = browser;
+
+  // Load the requested content once the browser exists.
+  if (!initial_url_.empty()) {
+    browser_->GetMainFrame()->LoadURL(initial_url_);
+  }
 
   // Prepare thread-safe notification signaling browser host creation and readiness
   is_ready_ = true;

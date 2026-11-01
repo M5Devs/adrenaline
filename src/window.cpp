@@ -1,6 +1,5 @@
 #include "window.h"
 #include "features.h"
-#include "vendor/webview.h"
 
 #include <thread>
 #include <mutex>
@@ -14,6 +13,26 @@
 #include <deque>
 #include <chrono>
 #include <vector>
+#include <utility>
+#include <cstdlib>
+
+#if ADREN_FEATURE_CEF
+#include "cef/adrenaline_app.h"
+#include "cef/adrenaline_client.h"
+#include "include/cef_app.h"
+#include "include/capi/cef_app_capi.h"
+#include "include/cef_browser.h"
+#include "include/cef_frame.h"
+#include "include/cef_parser.h"
+#include "include/cef_task.h"
+#include "include/views/cef_browser_view.h"
+#include "include/views/cef_window.h"
+#include "include/wrapper/cef_helpers.h"
+#include <dlfcn.h>
+#include <unistd.h>
+#else
+#include "vendor/webview.h"
+#endif
 
 namespace Adrenaline {
 
@@ -34,9 +53,17 @@ struct WindowInstance {
     bool lowEndDeviceMode{true};
     bool privacyShield{true};
 
+#if ADREN_FEATURE_CEF
+    // CEF engine state. Owned by the engine thread; the JS thread only ever
+    // touches it by posting tasks to the engine queue.
+    CefRefPtr<CefBrowser> browser;
+    CefRefPtr<CefWindow> window;
+    bool closing{false};
+#else
     // Owned by the engine thread and only ever touched from it. The JS thread
     // interacts with it exclusively by posting tasks to the engine queue.
     std::shared_ptr<webview::webview> wv;
+#endif
 
     Napi::ThreadSafeFunction tsfn;
     bool has_tsfn{false};
@@ -85,6 +112,35 @@ EngineState& engine() {
 }
 
 void EngineThreadMain() {
+#if ADREN_FEATURE_CEF
+    // CEF drives its own UI thread via an external message pump: we own the
+    // loop and must call CefDoMessageLoopWork() periodically. Without a sleep
+    // CEF's timers never elapse, so a short pause keeps them ticking.
+    for (;;) {
+        for (;;) {
+            std::function<void()> task;
+            {
+                std::lock_guard<std::mutex> lock(engine().mutex);
+                if (engine().tasks.empty()) {
+                    break;
+                }
+                task = std::move(engine().tasks.front());
+                engine().tasks.pop_front();
+            }
+            task();
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(engine().mutex);
+            if (engine().stop && engine().tasks.empty()) {
+                break;
+            }
+        }
+
+        CefDoMessageLoopWork();
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+#else
     GMainContext* ctx = g_main_context_default();
     for (;;) {
         for (;;) {
@@ -110,6 +166,7 @@ void EngineThreadMain() {
         // Block until the next GTK/WebKit event or a wakeup from a new task.
         g_main_context_iteration(ctx, TRUE);
     }
+#endif
 }
 
 void EnsureEngineThread() {
@@ -126,7 +183,11 @@ void PushEngineTask(std::function<void()> fn) {
         std::lock_guard<std::mutex> lock(engine().mutex);
         engine().tasks.push_back(std::move(fn));
     }
+#if ADREN_FEATURE_CEF
+    // The CEF loop wakes on its own; nothing else to signal.
+#else
     g_main_context_wakeup(g_main_context_default());
+#endif
 }
 
 // Runs fn on the engine thread and waits for it to finish.
@@ -144,10 +205,18 @@ void RunOnEngine(const std::function<void()>& fn) {
     finished.wait();
 }
 
-// Let pending GTK/WebKit work settle before tearing a webview down. Destroying a
+// Let pending engine work settle before tearing a window down. Destroying a
 // webview while WebKit is still loading leaves JSC state that aborts during
 // process exit, so pump the loop until it goes quiet (or the budget expires).
 void DrainEngine(int max_ms) {
+#if ADREN_FEATURE_CEF
+    auto deadline = std::chrono::steady_clock::now() +
+                    std::chrono::milliseconds(max_ms);
+    while (std::chrono::steady_clock::now() < deadline) {
+        CefDoMessageLoopWork();
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+#else
     GMainContext* ctx = g_main_context_default();
     auto deadline = std::chrono::steady_clock::now() +
                     std::chrono::milliseconds(max_ms);
@@ -156,7 +225,131 @@ void DrainEngine(int max_ms) {
             std::this_thread::sleep_for(std::chrono::milliseconds(2));
         }
     }
+#endif
 }
+
+#if ADREN_FEATURE_CEF
+// Directory containing libcef.so (and therefore icudtl.dat). Resolved from the
+// loaded shared object so the addon can be copied around without recompiling.
+// `cef_initialize` is the raw C entry point and is only defined by libcef.so;
+// the C++ `CefInitialize` thunk lives in the addon itself, so dladdr on it
+// would report the addon's directory instead.
+std::string CefModuleDir() {
+    Dl_info dl_info;
+    if (dladdr(reinterpret_cast<void*>(&cef_initialize), &dl_info) && dl_info.dli_fname) {
+        std::string path(dl_info.dli_fname);
+        auto slash = path.find_last_of('/');
+        if (slash != std::string::npos) {
+            return path.substr(0, slash);
+        }
+    }
+    return ".";
+}
+
+// Environment override first, then `candidates` (relative to the module dir),
+// returning the first path that exists on disk.
+std::string ResolveCefSubdir(const char* env_name,
+                             const std::vector<std::string>& candidates) {
+    const char* env = std::getenv(env_name);
+    if (env && *env) {
+        return env;
+    }
+    const std::string module_dir = CefModuleDir();
+    for (const auto& rel : candidates) {
+        std::string full = module_dir + "/" + rel;
+        if (access(full.c_str(), F_OK) == 0) {
+            return full;
+        }
+    }
+    return module_dir + "/" + candidates.front();
+}
+
+// CEF must be initialized exactly once, on the thread that pumps its message
+// loop. `CefExecuteProcess` returning >= 0 means this process is a CEF helper
+// subprocess and must exit immediately.
+bool EnsureCefInitialized() {
+    static bool initialized = false;
+    static bool failed = false;
+    if (initialized) {
+        return true;
+    }
+    if (failed) {
+        return false;
+    }
+
+    // CEF parses its switches from argv and needs at least argv[0]; an empty
+    // CefMainArgs corrupts early startup (it crashes in LoadLocalState). The
+    // addon has no argc/argv, so reconstruct them from /proc/self/cmdline.
+    std::vector<std::string> argv_storage;
+    {
+        FILE* f = fopen("/proc/self/cmdline", "rb");
+        if (f) {
+            std::string buf;
+            char chunk[4096];
+            size_t n;
+            while ((n = fread(chunk, 1, sizeof(chunk), f)) > 0) {
+                buf.append(chunk, n);
+            }
+            fclose(f);
+            size_t start = 0;
+            while (start < buf.size()) {
+                size_t end = buf.find('\0', start);
+                if (end == std::string::npos) {
+                    end = buf.size();
+                }
+                if (end > start) {
+                    argv_storage.push_back(buf.substr(start, end - start));
+                }
+                start = end + 1;
+            }
+        }
+        if (argv_storage.empty()) {
+            argv_storage.push_back("adrenaline");
+        }
+    }
+
+    std::vector<char*> argv;
+    argv.reserve(argv_storage.size() + 1);
+    for (auto& s : argv_storage) {
+        argv.push_back(const_cast<char*>(s.c_str()));
+    }
+    argv.push_back(nullptr);
+
+    CefMainArgs args(static_cast<int>(argv_storage.size()), argv.data());
+    int exit_code = CefExecuteProcess(args, nullptr, nullptr);
+    if (exit_code >= 0) {
+        std::_Exit(exit_code);
+    }
+
+    CefSettings settings;
+    settings.no_sandbox = true;
+    settings.log_severity = LOGSEVERITY_WARNING;
+    // A Node addon cannot spawn CEF's helper executables, so everything runs
+    // in-process.
+    settings.multi_threaded_message_loop = false;
+    settings.external_message_pump = true;
+
+    // icudtl.dat must be found next to libcef.so (CEF resolves it relative to
+    // the module, and neither resources_dir_path nor --icu-data-file override
+    // it), but the .pak bundles and locales may live in a sibling Resources/.
+    CefString(&settings.resources_dir_path) =
+        ResolveCefSubdir("ADREN_CEF_RESOURCES", {"../Resources", "Resources", "."});
+    CefString(&settings.locales_dir_path) =
+        ResolveCefSubdir("ADREN_CEF_LOCALES", {"../Resources/locales", "Resources/locales", "locales"});
+    CefString(&settings.locale) = "en-US";
+
+    std::string cache_dir = CefModuleDir() + "/.adrenaline_cache";
+    CefString(&settings.cache_path) = cache_dir;
+
+    CefRefPtr<AdrenalineApp> app(new AdrenalineApp());
+    if (!CefInitialize(args, settings, app, nullptr)) {
+        failed = true;
+        return false;
+    }
+    initialized = true;
+    return true;
+}
+#endif
 } // namespace
 
 
@@ -276,9 +469,93 @@ Napi::Value CreateWindow(const Napi::CallbackInfo& info) {
         windows_map()[window_id] = instance;
     }
 
-    // The webview is created on the shared engine thread; the JS thread only
-    // posts this setup task and returns the window id immediately.
+    // The engine (webview or CEF) is created on the shared engine thread; the
+    // JS thread only posts this setup task and returns the window id.
     EnsureEngineThread();
+#if ADREN_FEATURE_CEF
+    PushEngineTask([instance]() {
+        try {
+            if (!EnsureCefInitialized()) {
+                std::cerr << "Adrenaline: CefInitialize failed" << std::endl;
+                return;
+            }
+
+            std::string initial_url = instance->url;
+            if (!instance->html.empty()) {
+                std::string encoded =
+                    CefBase64Encode(instance->html.data(), instance->html.size()).ToString();
+                initial_url = "data:text/html;base64," + encoded;
+            }
+
+            auto on_ipc = [instance](const std::string& channel, const std::string& data) {
+                if (!instance->has_tsfn || instance->tsfn_released) {
+                    return;
+                }
+                // The webview path marshals a single JSON array string; reuse the
+                // same shape so the JS side needs no CEF-specific branch.
+                std::string* raw_req = new std::string("[" + channel + "," + data + "]");
+                napi_status status = instance->tsfn.NonBlockingCall(raw_req, [](Napi::Env env, Napi::Function jsCallback, std::string* payload) {
+                    if (env != nullptr && jsCallback != nullptr && payload != nullptr) {
+                        Napi::HandleScope scope(env);
+                        Napi::Object global = env.Global();
+                        Napi::Object jsonObj = global.Get("JSON").As<Napi::Object>();
+                        Napi::Function parseFn = jsonObj.Get("parse").As<Napi::Function>();
+
+                        Napi::Value parsed;
+                        try {
+                            parsed = parseFn.Call(jsonObj, { Napi::String::New(env, *payload) });
+                        } catch (...) {
+                            parsed = env.Null();
+                        }
+
+                        Napi::Value channelVal = env.Undefined();
+                        Napi::Value dataVal = env.Undefined();
+                        if (parsed.IsArray()) {
+                            Napi::Array arr = parsed.As<Napi::Array>();
+                            if (arr.Length() > 0) channelVal = arr.Get((uint32_t)0);
+                            if (arr.Length() > 1) dataVal = arr.Get((uint32_t)1);
+                        }
+                        jsCallback.Call({ channelVal, dataVal });
+                    }
+                    delete payload;
+                });
+                if (status != napi_ok) {
+                    delete raw_req;
+                }
+            };
+
+            CefRefPtr<AdrenalineClient> client(
+                new AdrenalineClient(on_ipc, initial_url));
+
+            CefBrowserSettings browser_settings;
+
+            CefRefPtr<CefBrowserView> browser_view = CefBrowserView::CreateBrowserView(
+                client, initial_url.empty() ? "about:blank" : initial_url,
+                browser_settings, nullptr, nullptr, nullptr);
+            if (!browser_view.get()) {
+                std::cerr << "Adrenaline: CreateBrowserView failed" << std::endl;
+                return;
+            }
+
+            CefRefPtr<CefWindow> window = CefWindow::CreateTopLevelWindow(nullptr);
+            if (!window.get()) {
+                std::cerr << "Adrenaline: CreateTopLevelWindow failed" << std::endl;
+                return;
+            }
+            window->SetTitle(instance->title);
+            window->SetBounds(CefRect(0, 0, instance->width, instance->height));
+            window->AddChildView(browser_view);
+            window->Show();
+
+            instance->window = window;
+            instance->browser = browser_view->GetBrowser();
+        } catch (const std::exception& e) {
+            std::cerr << "Adrenaline Window Exception: " << e.what() << std::endl;
+        } catch (...) {
+            std::cerr << "Adrenaline Window Unknown Exception" << std::endl;
+        }
+    });
+#else
     PushEngineTask([instance]() {
         try {
             bool debug_flag = false;
@@ -397,6 +674,7 @@ Napi::Value CreateWindow(const Napi::CallbackInfo& info) {
             instance->wv.reset();
         }
     });
+#endif
 
     return Napi::Number::New(env, window_id);
 }
@@ -425,6 +703,13 @@ Napi::Value CloseWindow(const Napi::CallbackInfo& info) {
         if (instance->has_tsfn && !instance->tsfn_released.exchange(true)) {
             instance->tsfn.Release();
         }
+#if ADREN_FEATURE_CEF
+        RunOnEngine([instance]() {
+            if (instance->browser) {
+                instance->browser->GetHost()->CloseBrowser(false);
+            }
+        });
+#endif
         // WebKit aborts when a webview is torn down, even after draining, so a
         // closed window's instance is parked here instead of destroyed. The OS
         // reclaims it at process exit; this keeps close() crash-free.
@@ -460,9 +745,15 @@ Napi::Value EvalWindow(const Napi::CallbackInfo& info) {
 
     if (instance) {
         RunOnEngine([instance, script]() {
+#if ADREN_FEATURE_CEF
+            if (instance->browser && instance->browser->GetMainFrame()) {
+                instance->browser->GetMainFrame()->ExecuteJavaScript(script, "", 0);
+            }
+#else
             if (instance->wv) {
                 instance->wv->eval(script);
             }
+#endif
         });
         return Napi::Boolean::New(env, true);
     }
@@ -493,9 +784,15 @@ Napi::Value NavigateWindow(const Napi::CallbackInfo& info) {
     if (instance) {
         instance->url = url;
         RunOnEngine([instance, url]() {
+#if ADREN_FEATURE_CEF
+            if (instance->browser && instance->browser->GetMainFrame()) {
+                instance->browser->GetMainFrame()->LoadURL(url);
+            }
+#else
             if (instance->wv) {
                 instance->wv->navigate(url);
             }
+#endif
         });
         return Napi::Boolean::New(env, true);
     }
@@ -519,14 +816,32 @@ void ShutdownWindows() {
     // segfaults during node's own teardown, so let pending loads settle first.
     // Windows still open here are deliberately not destroyed: tearing a webview
     // down at exit aborts even after draining, and the OS reclaims it anyway.
-    RunOnEngine([]() { DrainEngine(500); });
+    RunOnEngine([]() {
+        DrainEngine(500);
+#if ADREN_FEATURE_CEF
+        // Close any browser still alive before tearing CEF down; CefShutdown
+        // requires all browsers to be gone.
+        for (auto& entry : windows_map()) {
+            auto& instance = entry.second;
+            if (instance->browser) {
+                instance->browser->GetHost()->CloseBrowser(true);
+            }
+        }
+        DrainEngine(500);
+        CefShutdown();
+#endif
+    });
 
     // Stop and join the engine thread so it cannot outlive the process.
     {
         std::lock_guard<std::mutex> lock(engine().mutex);
         engine().stop = true;
     }
+#if ADREN_FEATURE_CEF
+    // The CEF pump polls on its own; nothing to wake.
+#else
     g_main_context_wakeup(g_main_context_default());
+#endif
     if (engine().thread.joinable()) {
         engine().thread.join();
     }

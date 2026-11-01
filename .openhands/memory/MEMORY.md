@@ -67,6 +67,39 @@ node-addon-api), JS surface in `lib/` + `index.js`/`index.mjs`, types `index.d.t
 - CPU: both ~260–280 % (2 SHA-256 workers dominate). IPC p95 ~1.8 ms vs ~5.1 ms.
 - Startup ~345 ms vs ~520 ms. Shipped size 273.7 MB vs 121.5 MB (node + addon).
 
+## CEF engine (`ADREN_FEATURE_CEF`, `npm run build -- --adren_engine=cef`)
+- Native layer: `src/cef/adrenaline_app.{h,cpp}` (CefApp + Browser/Render process
+  handlers, process-message IPC bridge, command-line switches) and
+  `src/cef/adrenaline_client.{h,cpp}` (CefClient: display/lifespan/load). Windowing
+  lives in `src/window.cpp` under `#if ADREN_FEATURE_CEF` (views API:
+  `CefWindow::CreateTopLevelWindow` + `CefBrowserView::CreateBrowserView`).
+- Engine thread pumps CEF with `external_message_pump=true` →
+  `CefDoMessageLoopWork()` + ~5 ms sleep each iteration. `CefInitialize` runs on
+  that engine thread, not the JS thread.
+
+### CEF integration gotchas (each cost real debugging time)
+- **`dladdr` on the C++ `CefInitialize` reports the ADDON dir, not libcef.so.**
+  The C++ symbol is a thin thunk defined in the addon (it calls `cef_initialize`).
+  Use `dladdr(&cef_initialize, ...)` (include `include/capi/cef_app_capi.h`) to
+  locate libcef.so / icudtl.dat. Wrong dir → CEF aborts with SIGTRAP in
+  `LoadLocalState` (chrome_main_delegate.cc:861) via `PostEarlyInitialization`.
+- `icudtl.dat` MUST sit next to `libcef.so`; CEF ignores `resources_dir_path` for
+  it. `.pak` bundles + `locales/` may live in a sibling `Resources/` found via
+  `resources_dir_path` / `locales_dir_path`.
+- `CefMainArgs` needs a real argv (≥ argv[0]); the addon reconstructs it from
+  `/proc/self/cmdline`.
+- Settings: `no_sandbox=true`, `multi_threaded_message_loop=false`,
+  `external_message_pump=true`, `locale="en-US"`, `cache_path=<module_dir>/.adrenaline_cache`.
+- `xvfb-run -a` is required for the tests; benign noise: dbus/bus.cc,
+  `chrome_100_percent.pak` load failures, `component_loader.cc` manifest warning.
+- Build defines come from `lib/config-resolver.js` (reads `adrenaline.config.js`):
+  `ADREN_FEATURE_CEF/WEBVIEW/DEVTOOLS/PDF/WEBRTC/CLEAN_PRIVACY/LOCAL_FILES`.
+- Pruning (`scripts/setup-cef.js`): strips all locales except `en-US*.pak`
+  (216 files / ~47 MB), removes `tests/`, relocates `icudtl.dat` next to
+  libcef.so, builds `libcef_dll_wrapper.a` and deletes intermediates.
+  `scripts/strip-runtime.js` applies `ASSET_STRIP_RULES` (e.g. removes
+  `Resources/devtools_resources.pak`, ~25 MB) to a packaged dist.
+
 ## Notes
 - An unrelated project's memory (a browser audio studio, "EchoLab") was previously
   stored in this file; it is preserved in `.openhands/memory/echolab-memory-archive.md`
