@@ -6,14 +6,28 @@
 
 #if ADREN_FEATURE_CEF
 
+#include <functional>
+
 #include "include/cef_client.h"
 
+// Per-window CEF client. One instance is created for each `BrowserWindow`; it
+// forwards renderer IPC to a C++ callback and tracks the browser/window
+// lifecycle so the engine thread can tear the window down cleanly.
 class AdrenalineClient : public CefClient,
                          public CefDisplayHandler,
                          public CefLifeSpanHandler,
-                         public CefLoadHandler {
+                         public CefLoadHandler,
+                         public CefRequestHandler {
 public:
-  AdrenalineClient();
+  // `on_ipc` receives `(channel_json, data_json)` exactly as emitted by the
+  // renderer bridge; it is invoked on the CEF UI thread. `on_created` runs from
+  // OnAfterCreated with the freshly created browser (browser creation is
+  // asynchronous, so the owner cannot read it right after Show()). `on_closed`
+  // runs once the browser has fully closed (from OnBeforeClose) so the owner can
+  // drop its browser reference and unblock CefShutdown.
+  AdrenalineClient(std::function<void(const std::string&, const std::string&)> on_ipc,
+                   std::function<void(CefRefPtr<CefBrowser>)> on_created,
+                   std::function<void()> on_closed);
   virtual ~AdrenalineClient();
 
   // CefClient methods:
@@ -26,11 +40,25 @@ public:
   virtual CefRefPtr<CefLoadHandler> GetLoadHandler() override {
     return this;
   }
+  virtual CefRefPtr<CefRequestHandler> GetRequestHandler() override {
+    return this;
+  }
+  virtual bool OnProcessMessageReceived(CefRefPtr<CefBrowser> browser,
+                                        CefRefPtr<CefFrame> frame,
+                                        CefProcessId source_process,
+                                        CefRefPtr<CefProcessMessage> message) override;
 
   // CefLifeSpanHandler methods:
   virtual void OnAfterCreated(CefRefPtr<CefBrowser> browser) override;
   virtual bool DoClose(CefRefPtr<CefBrowser> browser) override;
   virtual void OnBeforeClose(CefRefPtr<CefBrowser> browser) override;
+
+  // CefRequestHandler methods:
+  virtual bool OnBeforeBrowse(CefRefPtr<CefBrowser> browser,
+                              CefRefPtr<CefFrame> frame,
+                              CefRefPtr<CefRequest> request,
+                              bool user_gesture,
+                              bool is_redirect) override;
 
   // CefDisplayHandler methods:
   virtual void OnTitleChange(CefRefPtr<CefBrowser> browser,
@@ -58,6 +86,9 @@ private:
   bool is_ready_;
   bool is_loaded_;
   std::string current_title_;
+  std::function<void(const std::string&, const std::string&)> on_ipc_;
+  std::function<void(CefRefPtr<CefBrowser>)> on_created_;
+  std::function<void()> on_closed_;
 
   // Include the default reference counting implementation.
   IMPLEMENT_REFCOUNTING(AdrenalineClient);

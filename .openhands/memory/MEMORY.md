@@ -6,53 +6,110 @@ Ultra-lightweight Electron alternative: Node.js backend + native OS webviews
 node-addon-api), JS surface in `lib/` + `index.js`/`index.mjs`, types `index.d.ts`.
 
 ## Build & test
-- `npm run build` / `npm install` → `node-gyp rebuild` (sources: `src/main.cpp`,
-  `src/window.cpp`, `src/dialog.cpp`; engine = `webview`; `NAPI_VERSION=8`).
-  Produces `build/Release/adrenaline.node` (gitignored).
+- `npm run build` / `npm install` → `node scripts/build.js` → `node-gyp rebuild`
+  (sources: `src/main.cpp`, `src/window.cpp`, `src/dialog.cpp`; `NAPI_VERSION=8`).
+  Engine precedence: `--adren_engine`/`--engine` → `ADREN_ENGINE` →
+  `adrenaline.config.js` → `webview`. Falls back to `webview` when
+  `vendor/cef/Release/libcef.so` is absent (CI-safe). Produces
+  `build/Release/adrenaline.node` (gitignored).
+- CEF pipeline: `npm run setup:cef` (`scripts/setup-cef.js`) downloads the
+  newest stable linux64 *minimal* CEF from Spotify's CDN index, prunes locales
+  (keeps `en-US` + `en-US_{FEMININE,MASCULINE,NEUTER}.pak`; 216 removed, ~47 MB)
+  and tests, builds `libcef_dll_wrapper.a` via CMake (needs `cmake` installed),
+  then applies `lib/config-resolver.js` asset stripping (`devtools_resources.pak`
+  etc. when the matching module is off). `vendor/` is gitignored.
 - `npm test` runs `test/test*.js` (plain node scripts, no framework).
 - API surface mirrors Electron: `app`, `BrowserWindow`, `ipcMain`, `dialog`,
   `features`. The native layer injects a `window.adrenaline` bridge
   (`send`/`on`/`invoke`) into the webview — same shape Electron gets via a
   `contextBridge` preload.
 
+## CI (GitHub Actions)
+- `ci.yml` + `publish.yml` pinned to `runs-on: ubuntu-24.04`. `ubuntu-latest`
+  silently migrated 24.04 → 26.04 in late 2026 and broke the GTK/WebKit build:
+  on Ubuntu ≥ 26.04 `libglib2.0-dev` is a *metapackage* (no headers/`.pc`) — the
+  GLib headers and `glib-2.0.pc` moved to `libgio-2.0-dev`, so `pkg-config
+  --cflags gtk+-3.0` stops emitting the glib include path → `fatal error:
+  glib.h: No such file or directory`. A stock `ubuntu:26.04` Docker image works,
+  so it is runner-image-specific. Keep the pin; install `libglib2.0-dev`
+  explicitly. Do NOT add `libgio-2.0-dev` (absent on 24.04).
+
 ## Benchmark suite (Adrenaline vs Electron) — `benchmarks/`
-- `benchmarks/stress-suite/` compares both runtimes on one shared workload
-  (`app/{config,backend,harness,renderer,index.html,preload,hash-worker}.js`)
-  with `adrenaline-runner.js` / `electron-runner.js` / `profiler.js` / `run.js` /
+- `benchmarks/stress-suite/`: one shared workload (`app/*`) run under
+  `adrenaline-runner.js` / `electron-runner.js` / `profiler.js` / `run.js` /
   `report.js` / `tools/reaper.c`. `npm run benchmark` = `run.js && report.js`.
-- Report: `benchmarks/STRESS_TEST.md`; raw evidence
-  `benchmarks/stress-suite/profiles-combined.json` (committed on purpose).
-- Each runtime runs **sequentially** under `xvfb-run -a`, 500 ms sampling for 30 s.
-  Metrics: PSS summed tree-wide from `/proc/[pid]/smaps_rollup` (never a naive RSS
-  sum — double-counts shared libs), Private = Private_Clean+Private_Dirty, CPU from
-  Σ(utime+stime) deltas ÷ wallclock, IPC round-trip via hrtime (p50/90/95/99),
-  startup = spawn → first-paint IPC.
+- Report `benchmarks/STRESS_TEST.md`; raw evidence `profiles-combined.json`
+  (committed on purpose). Sequential runs under `xvfb-run -a`, 500 ms sampling
+  for 30 s. PSS summed tree-wide from `/proc/[pid]/smaps_rollup` (never naive RSS
+  sum — double-counts shared libs); Private = Private_Clean+Dirty; CPU from
+  Σ(utime+stime) ÷ wallclock; IPC round-trip via hrtime; startup = spawn → first paint.
 
 ### Benchmark environment quirks (each cost real debugging time)
-- **Launcher differs**: Adrenaline runs under `node`; Electron MUST launch with the
-  Electron binary (`node_modules/electron/dist/electron`, path in
-  `node_modules/electron/path.txt`). `run.js` `launcherFor()`; profiler `launcher` opt.
-- **WebKitGTK children are forked from a non-main thread**, so
-  `/proc/<pid>/task/<pid>/children` omits WebKitWebProcess/WebKitNetworkProcess.
-  Walk the tree from a full `/proc` scan keyed on the stat PPID field instead.
-- **Container PID 1 (openhands-agent-server) does not reap orphans** → SIGKILLed
-  grandchildren become permanent zombies. Fix: run the runner detached under the
-  subreaper `tools/reaper.c` (PR_SET_CHILD_SUBREAPER). It must **linger ~2 s after
-  its main child dies** (ECHILD fires before orphans re-parent). Then SIGTERM the
-  group and let the subreaper reap; SIGKILL only if members stay live. Zombie delta
-  across a run is then 0.
-- **Idle baseline contamination**: start SHA-256 CPU workers in `beginStorm()`, not
-  at boot, or the idle PSS sample includes hashing load.
-- Electron needs `--no-sandbox --disable-gpu` here (also via
-  `app.commandLine.appendSwitch`).
-- `profileRun`'s result-file wait loop must NOT be gated on the child being alive —
-  the runner writes results *during* shutdown, after which it exits.
+- Electron MUST launch via its binary (`node_modules/electron/dist/electron`,
+  path in `node_modules/electron/path.txt`), not `node`; Adrenaline runs under
+  `node`. See `run.js` `launcherFor()` / profiler `launcher` opt.
+- WebKitGTK children fork from a non-main thread, so
+  `/proc/<pid>/task/<pid>/children` omits WebKitWebProcess/NetworkProcess — walk
+  the tree from a full `/proc` scan keyed on stat PPID instead.
+- Container PID 1 (openhands-agent-server) does not reap orphans → SIGKILLed
+  grandchildren become permanent zombies. Run the runner detached under the
+  subreaper `tools/reaper.c` (PR_SET_CHILD_SUBREAPER), which must linger ~2 s
+  after its main child dies (ECHILD fires before orphans re-parent); then SIGTERM
+  the group. Zombie delta across a run is then 0.
+- Start SHA-256 CPU workers in `beginStorm()`, not at boot, or the idle PSS
+  sample includes hashing load. Electron needs `--no-sandbox --disable-gpu`.
+- `profileRun`'s result-file wait must NOT be gated on the child being alive —
+  the runner writes results during shutdown, then exits.
 
 ### Representative 30 s result (4-core EPYC 9B14, 16 GB, Debian 13, WebKitGTK 2.54)
 - Peak PSS: Electron ~700 MB (11 procs) vs Adrenaline ~512 MB (8 procs).
 - Idle PSS: Electron ~300 MB vs Adrenaline ~392 MB (WebKit reserves heap up front).
-- CPU: both ~260–280 % (2 SHA-256 workers dominate). IPC p95: ~1.8 ms vs ~5.1 ms.
-- Startup: ~345 ms vs ~520 ms. Shipped size: 273.7 MB vs 121.5 MB (node + addon).
+- CPU: both ~260–280 % (2 SHA-256 workers dominate). IPC p95 ~1.8 ms vs ~5.1 ms.
+- Startup ~345 ms vs ~520 ms. Shipped size 273.7 MB vs 121.5 MB (node + addon).
+
+## CEF engine (`ADREN_FEATURE_CEF`, `npm run build -- --adren_engine=cef`)
+- Native layer: `src/cef/adrenaline_app.{h,cpp}` (CefApp + Browser/Render process
+  handlers, process-message IPC bridge, command-line switches) and
+  `src/cef/adrenaline_client.{h,cpp}` (CefClient: display/lifespan/load). Windowing
+  lives in `src/window.cpp` under `#if ADREN_FEATURE_CEF` (views API:
+  `CefWindow::CreateTopLevelWindow` + `CefBrowserView::CreateBrowserView`).
+- Engine thread pumps CEF with `external_message_pump=true` →
+  `CefDoMessageLoopWork()` + ~5 ms sleep each iteration. `CefInitialize` runs on
+  that engine thread, not the JS thread.
+
+### CEF integration gotchas (each cost real debugging time)
+- **`dladdr` on the C++ `CefInitialize` reports the ADDON dir, not libcef.so.**
+  The C++ symbol is a thin thunk defined in the addon (it calls `cef_initialize`).
+  Use `dladdr(&cef_initialize, ...)` (include `include/capi/cef_app_capi.h`) to
+  locate libcef.so / icudtl.dat. Wrong dir → CEF aborts with SIGTRAP in
+  `LoadLocalState` (chrome_main_delegate.cc:861) via `PostEarlyInitialization`.
+- `icudtl.dat` MUST sit next to `libcef.so`; CEF ignores `resources_dir_path` for
+  it. `.pak` bundles + `locales/` may live in a sibling `Resources/` found via
+  `resources_dir_path` / `locales_dir_path`.
+- `CefMainArgs` needs a real argv (≥ argv[0]); the addon reconstructs it from
+  `/proc/self/cmdline`.
+- Settings: `no_sandbox=true`, `multi_threaded_message_loop=false`,
+  `external_message_pump=true`, `locale="en-US"`, `cache_path=<module_dir>/.adrenaline_cache`.
+- `xvfb-run -a` is required for the tests; benign noise: dbus/bus.cc,
+  `chrome_100_percent.pak` load failures, `component_loader.cc` manifest warning.
+- Build defines come from `lib/config-resolver.js` (reads `adrenaline.config.js`):
+  `ADREN_FEATURE_CEF/WEBVIEW/DEVTOOLS/PDF/WEBRTC/CLEAN_PRIVACY/LOCAL_FILES`.
+- Pruning (`scripts/setup-cef.js`): strips all locales except `en-US*.pak`
+  (216 files / ~47 MB), removes `tests/`, relocates `icudtl.dat` next to
+  libcef.so, builds `libcef_dll_wrapper.a` and deletes intermediates.
+  `scripts/strip-runtime.js` applies `ASSET_STRIP_RULES` (e.g. removes
+  `Resources/devtools_resources.pak`, ~25 MB) to a packaged dist.
+- **Runtime contracts (learned in review):** a Node addon cannot ship a CEF
+  helper subprocess, so `single-process` + `no-sandbox` are mandatory → remote
+  URLs are refused at CreateWindow/NavigateWindow (local schemes only;
+  `ADREN_CEF_ALLOW_REMOTE=1` opts in). `CefShutdown` must be preceded by closing
+  every browser AND waiting for `OnBeforeClose` (fixed drain timeouts are not
+  proof) — `CloseWindow` erases from `windows_map()`, so a separate
+  process-lifetime `all_windows()` registry is required. `cache_path` must be a
+  writable per-pid dir under `$XDG_CACHE_HOME` (`ADREN_CEF_CACHE` override),
+  removed after shutdown, never the module dir.
+- Env overrides: `ADREN_CEF_RESOURCES`, `ADREN_CEF_LOCALES`, `ADREN_CEF_CACHE`,
+  `ADREN_CEF_ALLOW_REMOTE`.
 
 ## Notes
 - An unrelated project's memory (a browser audio studio, "EchoLab") was previously

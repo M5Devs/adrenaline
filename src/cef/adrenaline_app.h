@@ -6,13 +6,28 @@
 #if ADREN_FEATURE_CEF
 
 #include "include/cef_app.h"
+#include "include/cef_render_process_handler.h"
+#include "include/cef_v8.h"
 
-class AdrenalineApp : public CefApp, public CefBrowserProcessHandler {
+// Process-message name carrying a `[channel, data]` JSON payload from the
+// renderer's `window.adrenaline.send` bridge to the browser process.
+extern const char kAdrenalineIpcMessage[];
+
+// Script installing the `window.adrenaline` bridge in every frame. Shared by
+// the CEF and webview engines so both expose an identical API.
+extern const char kAdrenalineBridgeScript[];
+
+class AdrenalineApp : public CefApp,
+                      public CefBrowserProcessHandler,
+                      public CefRenderProcessHandler {
 public:
   AdrenalineApp();
 
   // CefApp methods:
   virtual CefRefPtr<CefBrowserProcessHandler> GetBrowserProcessHandler() override {
+    return this;
+  }
+  virtual CefRefPtr<CefRenderProcessHandler> GetRenderProcessHandler() override {
     return this;
   }
 
@@ -22,6 +37,11 @@ public:
 
   // CefBrowserProcessHandler methods:
   virtual void OnContextInitialized() override;
+
+  // CefRenderProcessHandler methods:
+  virtual void OnContextCreated(CefRefPtr<CefBrowser> browser,
+                                CefRefPtr<CefFrame> frame,
+                                CefRefPtr<CefV8Context> context) override;
 
 private:
   // Include the default reference counting implementation.

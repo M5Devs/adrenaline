@@ -178,6 +178,26 @@ function removeTests(cefRoot) {
   return { removed: true, savedBytes };
 }
 
+/**
+ * CEF resolves `icudtl.dat` relative to `libcef.so` (module dir), not the
+ * executable, and neither `resources_dir_path` nor `--icu-data-file` overrides
+ * it. Move it next to libcef.so so the runtime finds it. The remaining `.pak`
+ * bundles stay in `Resources/` and are located via `resources_dir_path`.
+ */
+function relocateIcuData(cefRoot) {
+  const releaseDir = path.join(cefRoot, 'Release');
+  const src = path.join(cefRoot, 'Resources', 'icudtl.dat');
+  const dest = path.join(releaseDir, 'icudtl.dat');
+  if (!fs.existsSync(src) || fs.existsSync(dest)) {
+    return { moved: false };
+  }
+  if (!fs.existsSync(releaseDir)) {
+    return { moved: false };
+  }
+  fs.renameSync(src, dest);
+  return { moved: true };
+}
+
 function ensureWrapper() {
   if (fs.existsSync(WRAPPER_DEST)) {
     log(`Reusing existing ${path.relative(ROOT, WRAPPER_DEST)}`);
@@ -264,6 +284,11 @@ async function main() {
     log(`Removed vendor/cef/tests/ (${mb(tests.savedBytes)} MB)`);
   } else {
     log('No vendor/cef/tests/ directory present (minimal distribution).');
+  }
+
+  const icu = relocateIcuData(CEF_ROOT);
+  if (icu.moved) {
+    log('Relocated icudtl.dat next to libcef.so (CEF resolves it from the module dir).');
   }
 
   // 4. Build wrapper + prune intermediates ------------------------------------
