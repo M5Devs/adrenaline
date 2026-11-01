@@ -99,6 +99,17 @@ node-addon-api), JS surface in `lib/` + `index.js`/`index.mjs`, types `index.d.t
   libcef.so, builds `libcef_dll_wrapper.a` and deletes intermediates.
   `scripts/strip-runtime.js` applies `ASSET_STRIP_RULES` (e.g. removes
   `Resources/devtools_resources.pak`, ~25 MB) to a packaged dist.
+- **Runtime contracts (learned in review):** a Node addon cannot ship a CEF
+  helper subprocess, so `single-process` + `no-sandbox` are mandatory → remote
+  URLs are refused at CreateWindow/NavigateWindow (local schemes only;
+  `ADREN_CEF_ALLOW_REMOTE=1` opts in). `CefShutdown` must be preceded by closing
+  every browser AND waiting for `OnBeforeClose` (fixed drain timeouts are not
+  proof) — `CloseWindow` erases from `windows_map()`, so a separate
+  process-lifetime `all_windows()` registry is required. `cache_path` must be a
+  writable per-pid dir under `$XDG_CACHE_HOME` (`ADREN_CEF_CACHE` override),
+  removed after shutdown, never the module dir.
+- Env overrides: `ADREN_CEF_RESOURCES`, `ADREN_CEF_LOCALES`, `ADREN_CEF_CACHE`,
+  `ADREN_CEF_ALLOW_REMOTE`.
 
 ## Notes
 - An unrelated project's memory (a browser audio studio, "EchoLab") was previously
