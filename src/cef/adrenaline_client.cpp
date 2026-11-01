@@ -8,19 +8,23 @@
 #include "include/cef_app.h"
 #include "include/cef_parser.h"
 #include "include/cef_process_message.h"
+#include "include/cef_request.h"
 #include "include/cef_values.h"
 #include "include/wrapper/cef_helpers.h"
 
 #include "adrenaline_app.h"
+#include "adrenaline_url_policy.h"
 
 AdrenalineClient::AdrenalineClient(
     std::function<void(const std::string&, const std::string&)> on_ipc,
+    std::function<void(CefRefPtr<CefBrowser>)> on_created,
     std::function<void()> on_closed)
     : is_closing_(false),
       is_ready_(false),
       is_loaded_(false),
       current_title_(""),
       on_ipc_(std::move(on_ipc)),
+      on_created_(std::move(on_created)),
       on_closed_(std::move(on_closed)) {}
 
 AdrenalineClient::~AdrenalineClient() {}
@@ -58,6 +62,30 @@ void AdrenalineClient::OnAfterCreated(CefRefPtr<CefBrowser> browser) {
 
   // Prepare thread-safe notification signaling browser host creation and readiness
   is_ready_ = true;
+
+  // Browser creation is asynchronous: this is the first point the browser
+  // exists, so hand it to the owner (which records it on the WindowInstance for
+  // deterministic shutdown tracking).
+  if (on_created_) {
+    on_created_(browser);
+  }
+}
+
+bool AdrenalineClient::OnBeforeBrowse(CefRefPtr<CefBrowser> /*browser*/,
+                                      CefRefPtr<CefFrame> frame,
+                                      CefRefPtr<CefRequest> request,
+                                      bool /*user_gesture*/,
+                                      bool /*is_redirect*/) {
+  CEF_REQUIRE_UI_THREAD();
+
+  // Page-initiated navigations (link clicks, JS redirects, meta refreshes) do
+  // not go through CreateWindow/NavigateWindow, so enforce the remote-URL policy
+  // here too. Only the main frame matters for the privileged IPC bridge; remote
+  // sub-resources are allowed to load so local pages can still use CDNs.
+  if (!frame.get() || !frame->IsMain() || !request.get()) {
+    return false;
+  }
+  return adrenaline::RejectRemoteUrl(request->GetURL().ToString());
 }
 
 bool AdrenalineClient::DoClose(CefRefPtr<CefBrowser> browser) {

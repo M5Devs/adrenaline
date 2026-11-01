@@ -16,10 +16,12 @@
 #include <utility>
 #include <cstdlib>
 #include <filesystem>
+#include <algorithm>
 
 #if ADREN_FEATURE_CEF
 #include "cef/adrenaline_app.h"
 #include "cef/adrenaline_client.h"
+#include "cef/adrenaline_url_policy.h"
 #include "include/cef_app.h"
 #include "include/capi/cef_app_capi.h"
 #include "include/cef_browser.h"
@@ -60,6 +62,10 @@ struct WindowInstance {
     CefRefPtr<CefBrowser> browser;
     CefRefPtr<CefWindow> window;
     bool closing{false};
+    // Browser creation is asynchronous: set when CreateWindow posts the setup
+    // task and cleared from OnAfterCreated (which also assigns `browser`). A
+    // window is only fully torn down once browser_created && browser_closed.
+    std::atomic<bool> browser_created{false};
     // Set from OnBeforeClose (engine thread) once CEF has fully torn the browser
     // down. Shutdown waits on this instead of a fixed drain timeout.
     std::atomic<bool> browser_closed{false};
@@ -93,14 +99,34 @@ static std::vector<std::shared_ptr<WindowInstance>>& closed_windows() {
 static std::mutex g_closed_mutex;
 
 #if ADREN_FEATURE_CEF
-// Every window ever created, kept for the lifetime of the process so CEF
-// shutdown can find browsers that were closed (and thus removed from
-// windows_map()) but whose OnBeforeClose has not yet run.
+// Every CEF window, tracked only while its browser lifecycle is pending: entries
+// are added on creation and removed from OnBeforeClose. This lets shutdown find
+// browsers that were closed (and thus removed from windows_map()) but whose
+// OnBeforeClose has not yet run.
 static std::vector<std::shared_ptr<WindowInstance>>& all_windows() {
     static auto* v = new std::vector<std::shared_ptr<WindowInstance>>();
     return *v;
 }
 static std::mutex g_all_windows_mutex;
+
+// Called from OnBeforeClose (engine thread) once a CEF browser has fully closed.
+// Drops the parked references so a closed window does not leak its instance and
+// CefWindow for the life of the process. The webview path keeps parking closed
+// instances in closed_windows() on purpose, so this only touches CEF state.
+void ForgetClosedWindow(const std::shared_ptr<WindowInstance>& instance) {
+    {
+        std::lock_guard<std::mutex> lock(g_all_windows_mutex);
+        auto& all = all_windows();
+        all.erase(std::remove(all.begin(), all.end(), instance), all.end());
+    }
+    {
+        std::lock_guard<std::mutex> lock(g_closed_mutex);
+        auto& closed = closed_windows();
+        closed.erase(std::remove(closed.begin(), closed.end(), instance), closed.end());
+    }
+    // Release the CEF window reference; CEF has already destroyed the browser.
+    instance->window = nullptr;
+}
 #endif
 
 // GTK/WebKit are single-threaded: every gtk_*/webkit_* call, and iteration of
@@ -312,34 +338,10 @@ void RemoveCefCacheDir(const std::string& cache_dir) {
 }
 
 // With `single-process` + `no-sandbox` there is no renderer isolation, so remote
-// content must never run inside the Node process. Only local schemes are
-// permitted unless the embedder explicitly opts in via ADREN_CEF_ALLOW_REMOTE=1.
-bool IsLocalUrl(const std::string& url) {
-    static const char* kLocalSchemes[] = {
-        "file:", "data:", "about:", "chrome:", "blob:", "devtools:"
-    };
-    for (const char* scheme : kLocalSchemes) {
-        if (url.rfind(scheme, 0) == 0) {
-            return true;
-        }
-    }
-    return false;
-}
-
-bool IsRemoteUrlAllowed() {
-    const char* value = std::getenv("ADREN_CEF_ALLOW_REMOTE");
-    return value && std::string(value) == "1";
-}
-
-// Returns true when `url` must be rejected (remote content, opt-in not set).
-bool RejectRemoteUrl(const std::string& url) {
-    if (url.empty() || IsLocalUrl(url) || IsRemoteUrlAllowed()) {
-        return false;
-    }
-    std::cerr << "Adrenaline: refusing to load remote URL in single-process mode: "
-              << url << " (set ADREN_CEF_ALLOW_REMOTE=1 to override)" << std::endl;
-    return true;
-}
+// content must never run inside the Node process. The shared policy header is
+// also used by AdrenalineClient::OnBeforeBrowse so page-initiated navigations
+// (link clicks, redirects) are covered, not just these API entry points.
+using adrenaline::RejectRemoteUrl;
 
 // CEF must be initialized exactly once, on the thread that pumps its message
 // loop. `CefExecuteProcess` returning >= 0 means this process is a CEF helper
@@ -615,12 +617,22 @@ Napi::Value CreateWindow(const Napi::CallbackInfo& info) {
             };
 
             CefRefPtr<AdrenalineClient> client(
-                new AdrenalineClient(on_ipc, [instance]() {
-                    // Runs from OnBeforeClose: drop the parked reference so
-                    // CefShutdown() sees the browser as fully torn down.
-                    instance->browser_closed = true;
-                    instance->browser = nullptr;
-                }));
+                new AdrenalineClient(
+                    on_ipc,
+                    // Browser creation is asynchronous; record it on the
+                    // WindowInstance so shutdown can wait for its OnBeforeClose.
+                    [instance](CefRefPtr<CefBrowser> browser) {
+                        instance->browser = browser;
+                        instance->browser_created = true;
+                    },
+                    [instance]() {
+                        // Runs from OnBeforeClose: drop the parked reference and
+                        // unregister the instance so nothing leaks across
+                        // open/close cycles.
+                        instance->browser_closed = true;
+                        instance->browser = nullptr;
+                        ForgetClosedWindow(instance);
+                    }));
 
             CefBrowserSettings browser_settings;
 
@@ -643,7 +655,13 @@ Napi::Value CreateWindow(const Napi::CallbackInfo& info) {
             window->Show();
 
             instance->window = window;
-            instance->browser = browser_view->GetBrowser();
+            // `GetBrowser()` may still be null here (creation is asynchronous);
+            // OnAfterCreated assigns the browser once it exists. Record it early
+            // only when CEF already made it available.
+            if (CefRefPtr<CefBrowser> browser = browser_view->GetBrowser()) {
+                instance->browser = browser;
+                instance->browser_created = true;
+            }
         } catch (const std::exception& e) {
             std::cerr << "Adrenaline Window Exception: " << e.what() << std::endl;
         } catch (...) {
@@ -798,6 +816,15 @@ Napi::Value CloseWindow(const Napi::CallbackInfo& info) {
         if (instance->has_tsfn && !instance->tsfn_released.exchange(true)) {
             instance->tsfn.Release();
         }
+        // WebKit aborts when a webview is torn down, even after draining, so a
+        // closed window's instance is parked here instead of destroyed. The OS
+        // reclaims it at process exit; this keeps close() crash-free. For CEF the
+        // entry is removed again from OnBeforeClose (ForgetClosedWindow), so it is
+        // parked *before* the close is requested to avoid a re-add race.
+        {
+            std::lock_guard<std::mutex> lock(g_closed_mutex);
+            closed_windows().push_back(instance);
+        }
 #if ADREN_FEATURE_CEF
         RunOnEngine([instance]() {
             if (instance->browser) {
@@ -805,13 +832,6 @@ Napi::Value CloseWindow(const Napi::CallbackInfo& info) {
             }
         });
 #endif
-        // WebKit aborts when a webview is torn down, even after draining, so a
-        // closed window's instance is parked here instead of destroyed. The OS
-        // reclaims it at process exit; this keeps close() crash-free.
-        {
-            std::lock_guard<std::mutex> lock(g_closed_mutex);
-            closed_windows().push_back(instance);
-        }
         return Napi::Boolean::New(env, true);
     }
 
@@ -920,37 +940,52 @@ void ShutdownWindows() {
     // down at exit aborts even after draining, and the OS reclaims it anyway.
     RunOnEngine([]() {
 #if ADREN_FEATURE_CEF
-        // CEF requires every browser to be gone before CefShutdown(). Close both
-        // live windows and any window already removed from windows_map() by
-        // CloseWindow (parked in all_windows()), then wait for each browser's
-        // OnBeforeClose callback instead of relying on a fixed drain timeout.
+        // CEF requires every browser to be gone before CefShutdown(). Snapshot
+        // the registry (entries are removed from OnBeforeClose, so it must not
+        // be iterated live), then wait deterministically for both pending
+        // creations and active browsers to receive their OnBeforeClose callback.
         std::vector<std::shared_ptr<WindowInstance>> snapshot;
         {
             std::lock_guard<std::mutex> lock(g_all_windows_mutex);
             snapshot = all_windows();
         }
-        for (auto& instance : snapshot) {
-            if (instance->browser) {
-                instance->browser->GetHost()->CloseBrowser(true);
-            }
-        }
 
         auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-        while (std::chrono::steady_clock::now() < deadline) {
-            bool all_closed = true;
-            for (auto& instance : snapshot) {
-                // Only wait on browsers that were actually created; a window whose
-                // creation failed has no browser and nothing to close.
-                if (instance->browser && !instance->browser_closed) {
-                    all_closed = false;
-                    break;
-                }
-            }
-            if (all_closed) {
-                break;
-            }
+        // Bound how long we wait for a creation to complete. A creation that
+        // fails, or whose setup task is queued behind this one, never becomes a
+        // browser, so waiting the full budget would stall shutdown.
+        auto creation_deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(250);
+        auto pump = []() {
             CefDoMessageLoopWork();
             std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        };
+
+        std::vector<bool> close_requested(snapshot.size(), false);
+        while (std::chrono::steady_clock::now() < deadline) {
+            bool pending = false;
+            for (size_t i = 0; i < snapshot.size(); ++i) {
+                auto& instance = snapshot[i];
+                if (instance->browser_closed) {
+                    continue;
+                }
+                if (!instance->browser_created) {
+                    // Still waiting on OnAfterCreated; only keep waiting while
+                    // the creation budget lasts.
+                    if (std::chrono::steady_clock::now() < creation_deadline) {
+                        pending = true;
+                    }
+                    continue;
+                }
+                if (!close_requested[i] && instance->browser) {
+                    instance->browser->GetHost()->CloseBrowser(true);
+                    close_requested[i] = true;
+                }
+                pending = true;  // created, awaiting OnBeforeClose
+            }
+            if (!pending) {
+                break;
+            }
+            pump();
         }
         CefShutdown();
         RemoveCefCacheDir(ResolveCefCacheDir());
