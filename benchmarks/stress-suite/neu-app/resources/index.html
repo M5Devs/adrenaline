@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Adrenaline Stress Suite</title>
+<style id="theme">
+  :root {
+    --bg: #0b1020;
+    --fg: #e6ecff;
+    --accent: #4f8cff;
+    --row-a: #121a33;
+    --row-b: #0e1528;
+    --cell: 14px;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: "Liberation Sans", Arial, sans-serif;
+    background: var(--bg);
+    color: var(--fg);
+    font-size: var(--cell);
+    overflow: hidden;
+  }
+  #hud {
+    display: flex;
+    gap: 18px;
+    padding: 8px 12px;
+    background: #070b18;
+    border-bottom: 1px solid #1e2a4a;
+    flex-wrap: wrap;
+  }
+  #hud .stat { display: flex; flex-direction: column; }
+  #hud .stat b { font-size: 18px; color: var(--accent); }
+  #hud .stat span { font-size: 11px; opacity: 0.7; text-transform: uppercase; }
+  #table { height: calc(100vh - 96px); overflow: hidden; }
+  .row { display: grid; grid-template-columns: 70px 1fr 130px 120px 90px; }
+  .row:nth-child(even) { background: var(--row-a); }
+  .row:nth-child(odd) { background: var(--row-b); }
+  .cell { padding: 2px 8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .num { text-align: right; font-variant-numeric: tabular-nums; }
+  .up { color: #37d67a; }
+  .down { color: #ff5c5c; }
+  #spark { display: block; background: #070b18; }
+  #ticker { font-size: 11px; opacity: 0.85; max-width: 420px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+</style>
+</head>
+<body>
+  <div id="hud">
+    <div class="stat"><b id="s-rows">0</b><span>Rows</span></div>
+    <div class="stat"><b id="s-filtered">0</b><span>Filtered</span></div>
+    <div class="stat"><b id="s-ipc">0</b><span>IPC recv</span></div>
+    <div class="stat"><b id="s-frames">0</b><span>Frames</span></div>
+    <div class="stat"><b id="s-last">0.00</b><span>Last tick</span></div>
+    <div class="stat"><b id="s-sort">id</b><span>Sort</span></div>
+    <canvas id="spark" width="260" height="40"></canvas>
+    <div id="ticker">waiting for backend stream…</div>
+  </div>
+  <div id="table"></div>
+  <script src="neutralino.js"></script>
+  <script src="neu-inject.js"></script>
+  <script src="./renderer.js"></script>
+</body>
+</html>

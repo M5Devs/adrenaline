@@ -1,0 +1,30 @@
+{
+  "applicationId": "js.royalrumble.neutralino",
+  "version": "1.0.0",
+  "defaultMode": "window",
+  "url": "/",
+  "documentRoot": "/resources/",
+  "port": 0,
+  "enableServer": true,
+  "enableNativeAPI": true,
+  "enableExtensions": true,
+  "logging": { "enabled": true, "writeToLogFile": false },
+  "nativeAllowList": ["app.*", "extensions.*", "events.*", "debug.log", "window.*"],
+  "extensions": [
+    {
+      "id": "js.royalrumble.backend",
+      "command": "node ${NL_PATH}/extensions/rumble/main.js"
+    }
+  ],
+  "window": { "width": 1280, "height": 800, "title": "Neutralino Royal Rumble", "exitProcessOnClose": true },
+  "modes": {
+    "window": {
+      "title": "Neutralino Royal Rumble",
+      "width": 1280,
+      "height": 800,
+      "enableServer": true,
+      "enableNativeAPI": true,
+      "exitProcessOnClose": true
+    }
+  }
+}

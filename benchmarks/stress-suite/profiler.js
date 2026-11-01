@@ -185,29 +185,50 @@ function fileBytes(p) {
  */
 function measureFootprint(runtime, opts) {
   const root = opts.repoRoot;
+  const suite = path.join(root, 'benchmarks', 'stress-suite');
   const components = [];
+  const appDir = path.join(suite, 'app');
+
+  const runnerBytes = (files) => files.reduce((a, f) => a + fileBytes(path.join(suite, f)), 0);
+  const adrenalineCore = () => {
+    components.push({ label: 'Node.js runtime binary (' + path.basename(process.execPath) + ')', bytes: fileBytes(process.execPath) });
+    components.push({ label: 'adrenaline-js JS runtime (lib/ + index.js + index.mjs)', bytes: duBytes(path.join(root, 'lib')) + fileBytes(path.join(root, 'index.js')) + fileBytes(path.join(root, 'index.mjs')) });
+    components.push({ label: 'application assets (app/)', bytes: duBytes(appDir) });
+  };
 
   if (runtime === 'electron') {
-    const dist = path.join(root, 'node_modules', 'electron', 'dist');
-    components.push({ label: 'electron/dist (Chromium + Node + ICU + V8 snapshots)', bytes: duBytes(dist) });
-    const appDir = path.join(root, 'benchmarks', 'stress-suite', 'app');
+    components.push({ label: 'electron/dist (Chromium + Node + ICU + V8 snapshots)', bytes: duBytes(path.join(root, 'node_modules', 'electron', 'dist')) });
     components.push({ label: 'application assets (app/)', bytes: duBytes(appDir) });
-    const runners = ['electron-runner.js', 'profiler.js', 'run.js', 'report.js'];
-    let runnerBytes = 0;
-    for (const f of runners) runnerBytes += fileBytes(path.join(root, 'benchmarks', 'stress-suite', f));
-    components.push({ label: 'runner code', bytes: runnerBytes });
+    components.push({ label: 'runner code', bytes: runnerBytes(['electron-runner.js', 'profiler.js', 'run.js', 'report.js']) });
+  } else if (runtime === 'nw') {
+    const nwDist = nwDistributionDir(root);
+    components.push({ label: 'NW.js distribution (nw binary + libnw.so + Chromium + Node + ICU)', bytes: duBytes(nwDist) });
+    components.push({ label: 'application assets (app/)', bytes: duBytes(appDir) });
+    components.push({ label: 'runner code (nw-app/)', bytes: duBytes(path.join(suite, 'nw-app')) });
+  } else if (runtime === 'neutralino') {
+    components.push({ label: 'Neutralino binary (neutralino-linux_x64)', bytes: fileBytes(path.join(suite, 'neu-app', 'neutralino-linux_x64')) });
+    components.push({ label: 'Neutralino client library (neutralino.js)', bytes: fileBytes(path.join(suite, 'neu-app', 'resources', 'neutralino.js')) });
+    components.push({ label: 'application assets (app/)', bytes: duBytes(appDir) });
+    components.push({ label: 'runner code (neu-app/ extensions)', bytes: duBytes(path.join(suite, 'neu-app', 'extensions')) + fileBytes(path.join(suite, 'neu-app', 'resources', 'neu-inject.js')) });
+    // Neutralino delegates both the renderer (system WebView) and the backend
+    // (the user's own runtime) to the OS; the backend here is Node.js.
+    components.push({ label: 'Node.js runtime binary for the extension backend (' + path.basename(process.execPath) + ')', bytes: fileBytes(process.execPath) });
+    const wk = sharedLibraryBytes(['libwebkit2gtk-4.1.so.0', 'libwebkit2gtk-4.0.so.0']);
+    if (wk) components.push({ label: 'system WebKitGTK shared library (NOT shipped)', bytes: wk, shared: true });
+  } else if (runtime === 'adrenaline-cef') {
+    adrenalineCore();
+    components.push({ label: 'adrenaline native addon (CEF engine)', bytes: fileBytes(path.join(root, '.bench-artifacts', 'adrenaline-cef.node')) });
+    const cef = path.join(root, 'vendor', 'cef');
+    components.push({ label: 'libcef.so (pruned Chromium, debug symbols stripped)', bytes: fileBytes(path.join(cef, 'Release', 'libcef.so')) });
+    components.push({ label: 'libcef_dll_wrapper.a', bytes: fileBytes(path.join(cef, 'libcef_dll_wrapper', 'libcef_dll_wrapper.a')) });
+    components.push({ label: 'icudtl.dat', bytes: fileBytes(path.join(cef, 'Release', 'icudtl.dat')) });
+    components.push({ label: 'core .pak bundles + locales (pruned to en-US)', bytes: duBytes(path.join(cef, 'Resources')) + fileBytes(path.join(cef, 'Release', 'v8_context_snapshot.bin')) });
+    components.push({ label: 'libEGL.so + libGLESv2.so + swiftshader/vulkan', bytes: fileBytes(path.join(cef, 'Release', 'libEGL.so')) + fileBytes(path.join(cef, 'Release', 'libGLESv2.so')) + fileBytes(path.join(cef, 'Release', 'libvk_swiftshader.so')) + fileBytes(path.join(cef, 'Release', 'libvulkan.so.1')) });
+    components.push({ label: 'runner code', bytes: runnerBytes(['adrenaline-runner.js', 'profiler.js', 'run.js', 'report.js']) });
   } else {
-    const nodeBinary = process.execPath;
-    components.push({ label: 'Node.js runtime binary (' + path.basename(nodeBinary) + ')', bytes: fileBytes(nodeBinary) });
-    components.push({ label: 'adrenaline native addon (build/Release/adrenaline.node)', bytes: fileBytes(path.join(root, 'build', 'Release', 'adrenaline.node')) });
-    components.push({ label: 'adrenaline-js JS runtime (lib/ + index.js + index.mjs)', bytes: duBytes(path.join(root, 'lib')) + fileBytes(path.join(root, 'index.js')) + fileBytes(path.join(root, 'index.mjs')) });
-    components.push({ label: 'node-addon-api (compiled into addon; header-only)', bytes: duBytes(path.join(root, 'node_modules', 'node-addon-api')) });
-    const appDir = path.join(root, 'benchmarks', 'stress-suite', 'app');
-    components.push({ label: 'application assets (app/)', bytes: duBytes(appDir) });
-    const runners = ['adrenaline-runner.js', 'profiler.js', 'run.js', 'report.js'];
-    let runnerBytes = 0;
-    for (const f of runners) runnerBytes += fileBytes(path.join(root, 'benchmarks', 'stress-suite', f));
-    components.push({ label: 'runner code', bytes: runnerBytes });
+    adrenalineCore();
+    components.push({ label: 'adrenaline native addon (WebView engine)', bytes: fileBytes(path.join(root, '.bench-artifacts', 'adrenaline-webview.node')) });
+    components.push({ label: 'runner code', bytes: runnerBytes(['adrenaline-runner.js', 'profiler.js', 'run.js', 'report.js']) });
     // The framework does not bundle WebKitGTK: it links the OS-provided shared
     // library, which is measured separately and clearly labelled as shared.
     const wk = sharedLibraryBytes(['libwebkit2gtk-4.1.so.0', 'libwebkit2gtk-4.0.so.0']);
@@ -217,6 +238,15 @@ function measureFootprint(runtime, opts) {
   const total = components.reduce((a, c) => a + c.bytes, 0);
   const shippedTotal = components.reduce((a, c) => a + (c.shared ? 0 : c.bytes), 0);
   return { runtime, components, total, shippedTotal };
+}
+
+function nwDistributionDir(root) {
+  const base = path.join(root, 'node_modules', 'nw');
+  try {
+    const entry = fs.readdirSync(base).find((n) => n.startsWith('nwjs-'));
+    if (entry) return path.join(base, entry);
+  } catch (e) { /* ignore */ }
+  return base;
 }
 
 function sharedLibraryBytes(names) {
@@ -324,6 +354,12 @@ async function profileRun(opts) {
     // Electron. `runnerPath` is appended, followed by extraArgs.
     launcher = process.execPath,
     extraArgs = [],
+    // Explicit command form: [binary, ...args]. When given it replaces
+    // `launcher` + `runnerPath` + `extraArgs`, which lets runtimes that are not
+    // driven by Node (NW.js, Neutralinojs) be launched the same way.
+    command = null,
+    // Working directory for the runtime process (Neutralino needs its own).
+    runCwd = null,
     env = {},
   } = opts;
 
@@ -333,9 +369,9 @@ async function profileRun(opts) {
   // Everything runs under the subreaper wrapper so that SIGKILLed orphans are
   // re-parented to it (not to the container's non-reaping PID 1) and reaped.
   const reaperBin = ensureReaper();
-  const appArgs = [runnerPath, ...extraArgs];
-  const innerCmd = useXvfb ? 'xvfb-run' : launcher;
-  const innerArgs = useXvfb ? ['-a', launcher, ...appArgs] : appArgs;
+  const appArgs = command || [launcher, runnerPath, ...extraArgs];
+  const innerCmd = useXvfb ? 'xvfb-run' : appArgs[0];
+  const innerArgs = useXvfb ? ['-a', ...appArgs] : appArgs.slice(1);
   const launchCmd = reaperBin || innerCmd;
   const launchArgs = reaperBin ? [innerCmd, ...innerArgs] : innerArgs;
 
@@ -343,7 +379,7 @@ async function profileRun(opts) {
   const spawnHr = process.hrtime.bigint();
 
   const child = spawn(launchCmd, launchArgs, {
-    cwd: repoRoot,
+    cwd: runCwd || repoRoot,
     env: { ...process.env, ...env },
     stdio: ['ignore', 'pipe', 'pipe'],
     detached: true,
@@ -548,26 +584,22 @@ module.exports = {
 
 // Allow standalone invocation of a single runtime: node profiler.js <runtime>
 if (require.main === module) {
-  const runtime = process.argv[2] || 'adrenaline';
+  const { commandFor } = require('./runtimes');
+  const runtime = process.argv[2] || 'adrenaline-webview';
   const repoRoot = path.resolve(__dirname, '..', '..');
-  const runner = path.join(__dirname, runtime === 'electron' ? 'electron-runner.js' : 'adrenaline-runner.js');
   const resultFile = path.join(__dirname, `results-${runtime}.json`);
   const phaseFile = path.join(__dirname, `phase-${runtime}.json`);
-  const launcher = runtime === 'electron'
-    ? path.join(repoRoot, 'node_modules', 'electron', 'dist',
-        fs.readFileSync(path.join(repoRoot, 'node_modules', 'electron', 'path.txt'), 'utf8').trim())
-    : process.execPath;
+  const spec = commandFor(runtime, { repoRoot, suiteDir: __dirname });
   profileRun({
     runtime,
-    runnerPath: runner,
     repoRoot,
-    launcher,
     durationMs: Number(process.env.STRESS_DURATION_MS || 30000),
     intervalMs: Number(process.env.STRESS_INTERVAL_MS || 500),
     resultFile,
     phaseFile,
-    extraArgs: runtime === 'electron' ? ['--no-sandbox', '--disable-gpu'] : [],
-    env: { STRESS_RESULT_FILE: resultFile, STRESS_PHASE_FILE: phaseFile },
+    command: spec.command,
+    runCwd: spec.cwd,
+    env: { STRESS_RESULT_FILE: resultFile, STRESS_PHASE_FILE: phaseFile, STRESS_DURATION_MS: process.env.STRESS_DURATION_MS || '30000', ...spec.env },
   }).then((p) => {
     console.log(JSON.stringify(p, null, 2));
   }).catch((e) => { console.error(e); process.exit(1); });
