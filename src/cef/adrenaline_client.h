@@ -19,11 +19,11 @@ class AdrenalineClient : public CefClient,
                          public CefLoadHandler {
 public:
   // `on_ipc` receives `(channel_json, data_json)` exactly as emitted by the
-  // renderer bridge; it is invoked on the CEF UI thread. `initial_url` is
-  // loaded as soon as the browser is created (window.cpp already resolves
-  // `html` options into a `data:` URI).
+  // renderer bridge; it is invoked on the CEF UI thread. `on_closed` runs once
+  // the browser has fully closed (from OnBeforeClose) so the owner can drop its
+  // browser reference and unblock CefShutdown.
   AdrenalineClient(std::function<void(const std::string&, const std::string&)> on_ipc,
-                   std::string initial_url);
+                   std::function<void()> on_closed);
   virtual ~AdrenalineClient();
 
   // CefClient methods:
@@ -72,8 +72,8 @@ private:
   bool is_ready_;
   bool is_loaded_;
   std::string current_title_;
-  std::string initial_url_;
   std::function<void(const std::string&, const std::string&)> on_ipc_;
+  std::function<void()> on_closed_;
 
   // Include the default reference counting implementation.
   IMPLEMENT_REFCOUNTING(AdrenalineClient);

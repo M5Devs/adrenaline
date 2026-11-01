@@ -15,6 +15,7 @@
 #include <vector>
 #include <utility>
 #include <cstdlib>
+#include <filesystem>
 
 #if ADREN_FEATURE_CEF
 #include "cef/adrenaline_app.h"
@@ -59,6 +60,9 @@ struct WindowInstance {
     CefRefPtr<CefBrowser> browser;
     CefRefPtr<CefWindow> window;
     bool closing{false};
+    // Set from OnBeforeClose (engine thread) once CEF has fully torn the browser
+    // down. Shutdown waits on this instead of a fixed drain timeout.
+    std::atomic<bool> browser_closed{false};
 #else
     // Owned by the engine thread and only ever touched from it. The JS thread
     // interacts with it exclusively by posting tasks to the engine queue.
@@ -87,6 +91,17 @@ static std::vector<std::shared_ptr<WindowInstance>>& closed_windows() {
     return *v;
 }
 static std::mutex g_closed_mutex;
+
+#if ADREN_FEATURE_CEF
+// Every window ever created, kept for the lifetime of the process so CEF
+// shutdown can find browsers that were closed (and thus removed from
+// windows_map()) but whose OnBeforeClose has not yet run.
+static std::vector<std::shared_ptr<WindowInstance>>& all_windows() {
+    static auto* v = new std::vector<std::shared_ptr<WindowInstance>>();
+    return *v;
+}
+static std::mutex g_all_windows_mutex;
+#endif
 
 // GTK/WebKit are single-threaded: every gtk_*/webkit_* call, and iteration of
 // the default GMainContext, must happen on one thread. Running a main loop per
@@ -264,6 +279,68 @@ std::string ResolveCefSubdir(const char* env_name,
     return module_dir + "/" + candidates.front();
 }
 
+// Resolve a writable, per-process CEF cache directory. `root_cache_path`
+// defaults to `cache_path`, so sharing it across instances makes them fight over
+// the same process-singleton root; a unique child keeps concurrent instances
+// apart. The module directory is often read-only, so prefer the user cache dir.
+std::string ResolveCefCacheDir() {
+    const char* override = std::getenv("ADREN_CEF_CACHE");
+    if (override && *override) {
+        return override;
+    }
+    std::string base;
+    const char* xdg = std::getenv("XDG_CACHE_HOME");
+    if (xdg && *xdg) {
+        base = xdg;
+    } else {
+        const char* home = std::getenv("HOME");
+        base = (home && *home) ? (std::string(home) + "/.cache") : "/tmp";
+    }
+    return base + "/adrenaline/cef-" + std::to_string(getpid());
+}
+
+// The cache directory is unique per process; remove it after CefShutdown so
+// repeated runs do not accumulate directories. An explicit ADREN_CEF_CACHE is
+// left untouched (the embedder chose it).
+void RemoveCefCacheDir(const std::string& cache_dir) {
+    const char* override = std::getenv("ADREN_CEF_CACHE");
+    if (override && *override) {
+        return;
+    }
+    std::error_code ec;
+    std::filesystem::remove_all(cache_dir, ec);
+}
+
+// With `single-process` + `no-sandbox` there is no renderer isolation, so remote
+// content must never run inside the Node process. Only local schemes are
+// permitted unless the embedder explicitly opts in via ADREN_CEF_ALLOW_REMOTE=1.
+bool IsLocalUrl(const std::string& url) {
+    static const char* kLocalSchemes[] = {
+        "file:", "data:", "about:", "chrome:", "blob:", "devtools:"
+    };
+    for (const char* scheme : kLocalSchemes) {
+        if (url.rfind(scheme, 0) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool IsRemoteUrlAllowed() {
+    const char* value = std::getenv("ADREN_CEF_ALLOW_REMOTE");
+    return value && std::string(value) == "1";
+}
+
+// Returns true when `url` must be rejected (remote content, opt-in not set).
+bool RejectRemoteUrl(const std::string& url) {
+    if (url.empty() || IsLocalUrl(url) || IsRemoteUrlAllowed()) {
+        return false;
+    }
+    std::cerr << "Adrenaline: refusing to load remote URL in single-process mode: "
+              << url << " (set ADREN_CEF_ALLOW_REMOTE=1 to override)" << std::endl;
+    return true;
+}
+
 // CEF must be initialized exactly once, on the thread that pumps its message
 // loop. `CefExecuteProcess` returning >= 0 means this process is a CEF helper
 // subprocess and must exit immediately.
@@ -338,7 +415,7 @@ bool EnsureCefInitialized() {
         ResolveCefSubdir("ADREN_CEF_LOCALES", {"../Resources/locales", "Resources/locales", "locales"});
     CefString(&settings.locale) = "en-US";
 
-    std::string cache_dir = CefModuleDir() + "/.adrenaline_cache";
+    std::string cache_dir = ResolveCefCacheDir();
     CefString(&settings.cache_path) = cache_dir;
 
     CefRefPtr<AdrenalineApp> app(new AdrenalineApp());
@@ -469,6 +546,13 @@ Napi::Value CreateWindow(const Napi::CallbackInfo& info) {
         windows_map()[window_id] = instance;
     }
 
+#if ADREN_FEATURE_CEF
+    {
+        std::lock_guard<std::mutex> lock(g_all_windows_mutex);
+        all_windows().push_back(instance);
+    }
+#endif
+
     // The engine (webview or CEF) is created on the shared engine thread; the
     // JS thread only posts this setup task and returns the window id.
     EnsureEngineThread();
@@ -485,6 +569,12 @@ Napi::Value CreateWindow(const Napi::CallbackInfo& info) {
                 std::string encoded =
                     CefBase64Encode(instance->html.data(), instance->html.size()).ToString();
                 initial_url = "data:text/html;base64," + encoded;
+            }
+
+            // `data:` (from `html`) is local; only a caller-supplied remote `url`
+            // can trip the guard.
+            if (RejectRemoteUrl(initial_url)) {
+                return;
             }
 
             auto on_ipc = [instance](const std::string& channel, const std::string& data) {
@@ -525,7 +615,12 @@ Napi::Value CreateWindow(const Napi::CallbackInfo& info) {
             };
 
             CefRefPtr<AdrenalineClient> client(
-                new AdrenalineClient(on_ipc, initial_url));
+                new AdrenalineClient(on_ipc, [instance]() {
+                    // Runs from OnBeforeClose: drop the parked reference so
+                    // CefShutdown() sees the browser as fully torn down.
+                    instance->browser_closed = true;
+                    instance->browser = nullptr;
+                }));
 
             CefBrowserSettings browser_settings;
 
@@ -782,6 +877,13 @@ Napi::Value NavigateWindow(const Napi::CallbackInfo& info) {
     }
 
     if (instance) {
+#if ADREN_FEATURE_CEF
+        // Same local-URL policy as CreateWindow: single-process mode must not
+        // navigate to remote content.
+        if (RejectRemoteUrl(url)) {
+            return Napi::Boolean::New(env, false);
+        }
+#endif
         instance->url = url;
         RunOnEngine([instance, url]() {
 #if ADREN_FEATURE_CEF
@@ -817,18 +919,43 @@ void ShutdownWindows() {
     // Windows still open here are deliberately not destroyed: tearing a webview
     // down at exit aborts even after draining, and the OS reclaims it anyway.
     RunOnEngine([]() {
-        DrainEngine(500);
 #if ADREN_FEATURE_CEF
-        // Close any browser still alive before tearing CEF down; CefShutdown
-        // requires all browsers to be gone.
-        for (auto& entry : windows_map()) {
-            auto& instance = entry.second;
+        // CEF requires every browser to be gone before CefShutdown(). Close both
+        // live windows and any window already removed from windows_map() by
+        // CloseWindow (parked in all_windows()), then wait for each browser's
+        // OnBeforeClose callback instead of relying on a fixed drain timeout.
+        std::vector<std::shared_ptr<WindowInstance>> snapshot;
+        {
+            std::lock_guard<std::mutex> lock(g_all_windows_mutex);
+            snapshot = all_windows();
+        }
+        for (auto& instance : snapshot) {
             if (instance->browser) {
                 instance->browser->GetHost()->CloseBrowser(true);
             }
         }
-        DrainEngine(500);
+
+        auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (std::chrono::steady_clock::now() < deadline) {
+            bool all_closed = true;
+            for (auto& instance : snapshot) {
+                // Only wait on browsers that were actually created; a window whose
+                // creation failed has no browser and nothing to close.
+                if (instance->browser && !instance->browser_closed) {
+                    all_closed = false;
+                    break;
+                }
+            }
+            if (all_closed) {
+                break;
+            }
+            CefDoMessageLoopWork();
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
         CefShutdown();
+        RemoveCefCacheDir(ResolveCefCacheDir());
+#else
+        DrainEngine(500);
 #endif
     });
 

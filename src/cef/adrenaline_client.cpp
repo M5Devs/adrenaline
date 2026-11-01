@@ -15,13 +15,13 @@
 
 AdrenalineClient::AdrenalineClient(
     std::function<void(const std::string&, const std::string&)> on_ipc,
-    std::string initial_url)
+    std::function<void()> on_closed)
     : is_closing_(false),
       is_ready_(false),
       is_loaded_(false),
       current_title_(""),
-      initial_url_(std::move(initial_url)),
-      on_ipc_(std::move(on_ipc)) {}
+      on_ipc_(std::move(on_ipc)),
+      on_closed_(std::move(on_closed)) {}
 
 AdrenalineClient::~AdrenalineClient() {}
 
@@ -51,13 +51,10 @@ bool AdrenalineClient::OnProcessMessageReceived(CefRefPtr<CefBrowser> /*browser*
 void AdrenalineClient::OnAfterCreated(CefRefPtr<CefBrowser> browser) {
   CEF_REQUIRE_UI_THREAD();
 
-  // Store the active browser reference
+  // Store the active browser reference. The initial URL was already handed to
+  // CefBrowserView::CreateBrowserView, which starts the navigation when the view
+  // is shown, so loading it again here would duplicate the request.
   browser_ = browser;
-
-  // Load the requested content once the browser exists.
-  if (!initial_url_.empty()) {
-    browser_->GetMainFrame()->LoadURL(initial_url_);
-  }
 
   // Prepare thread-safe notification signaling browser host creation and readiness
   is_ready_ = true;
@@ -83,6 +80,12 @@ void AdrenalineClient::OnBeforeClose(CefRefPtr<CefBrowser> browser) {
     browser_ = nullptr;
   }
   is_ready_ = false;
+
+  // Last lifecycle callback for this browser: let the owner release its own
+  // browser reference so CefShutdown() can proceed.
+  if (on_closed_) {
+    on_closed_();
+  }
 }
 
 void AdrenalineClient::OnTitleChange(CefRefPtr<CefBrowser> browser,
