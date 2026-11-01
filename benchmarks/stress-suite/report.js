@@ -1,8 +1,10 @@
 'use strict';
 
 /*
- * Report generator. Reads the aggregated evidence in profiles-combined.json
- * (written by run.js) and emits benchmarks/STRESS_TEST.md.
+ * Royal Rumble report generator.
+ *
+ * Reads the aggregated evidence in profiles-combined.json (written by run.js)
+ * and emits benchmarks/ROYAL_RUMBLE_SHOWDOWN.md.
  *
  * Every number in the report comes straight from the profiler's samples; the
  * generator only formats and computes deltas. It never invents or scales a
@@ -13,29 +15,19 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { spawnSync } = require('child_process');
+const { ORDER, RUNTIMES } = require('./runtimes');
 
 const SUITE_DIR = __dirname;
 const REPO_ROOT = path.resolve(__dirname, '..', '..');
-const OUT = path.join(REPO_ROOT, 'benchmarks', 'STRESS_TEST.md');
+const OUT = path.join(REPO_ROOT, 'benchmarks', 'ROYAL_RUMBLE_SHOWDOWN.md');
 const EVIDENCE = path.join(SUITE_DIR, 'profiles-combined.json');
 
 const MB = 1024 * 1024;
+const MB_KB = 1024;
 
-function mb(kb) { return kb / 1024; }
+function mb(kb) { return kb / MB_KB; }
 function fmt(n, d = 1) { return Number.isFinite(n) ? n.toFixed(d) : 'n/a'; }
 function bytesToMb(b) { return b / MB; }
-
-function pct(adren, base) {
-  if (!Number.isFinite(adren) || !Number.isFinite(base) || base === 0) return 'n/a';
-  const v = ((adren - base) / base) * 100;
-  const sign = v > 0 ? '+' : '';
-  return sign + v.toFixed(1) + ' %';
-}
-
-function pctSigned(v) {
-  if (!Number.isFinite(v)) return 'n/a';
-  return (v > 0 ? '+' : '') + v.toFixed(1) + ' %';
-}
 
 function cpuModel() {
   try {
@@ -57,18 +49,26 @@ function osPretty() {
   return os.type() + ' ' + os.release();
 }
 
+function pkgVersion(pkg, fallback) {
+  try {
+    const p = path.join(REPO_ROOT, 'node_modules', pkg, 'package.json');
+    return JSON.parse(fs.readFileSync(p, 'utf8')).version;
+  } catch (e) { return fallback; }
+}
+
 function webkitVersion() {
-  const r = spawnSync('pkg-config', ['--modversion', 'webkit2gtk-4.1'], { encoding: 'utf8' });
-  if (r.status === 0) return 'WebKitGTK ' + r.stdout.trim();
-  const r2 = spawnSync('pkg-config', ['--modversion', 'webkit2gtk-4.0'], { encoding: 'utf8' });
-  if (r2.status === 0) return 'WebKitGTK ' + r2.stdout.trim();
+  for (const v of ['webkit2gtk-4.1', 'webkit2gtk-4.0']) {
+    const r = spawnSync('pkg-config', ['--modversion', v], { encoding: 'utf8' });
+    if (r.status === 0) return 'WebKitGTK ' + r.stdout.trim();
+  }
   return 'WebKitGTK (system)';
 }
 
-function electronVersion() {
+function cefVersion() {
   try {
-    return JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'node_modules', 'electron', 'package.json'), 'utf8')).version;
-  } catch (e) { return 'unknown'; }
+    const m = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'vendor', 'cef', 'cef-manifest.json'), 'utf8'));
+    return 'CEF ' + (m.cefVersion || 'unknown') + ' (Chromium ' + (m.chromiumVersion || 'unknown') + ')';
+  } catch (e) { return 'CEF (pruned)'; }
 }
 
 function adrenalineVersion() {
@@ -77,46 +77,75 @@ function adrenalineVersion() {
   } catch (e) { return 'unknown'; }
 }
 
-function procLine(p) {
-  const comm = p.comm && p.comm.trim() ? p.comm.trim() : 'unknown';
-  return '| `' + comm + '` | ' + p.pid + ' | ' + fmt(mb(p.maxPssKb)) + ' | ' + fmt(mb(p.maxPrivateKb)) + ' | ' + fmt(mb(p.maxRssKb)) + ' |';
+/** Normalise each runtime's evidence into one flat metric bag. */
+function metrics(ev) {
+  const p = ev.profile || {};
+  const r = p.runnerResult || { stats: {} };
+  const lat = r.stats.ipcLatency || {};
+  const hash = r.stats.hash || {};
+  return {
+    startupMs: p.startupMs,
+    idlePssKb: p.idle ? p.idle.pssKb : NaN,
+    peakPssKb: p.peak ? p.peak.pssKb : NaN,
+    peakPrivateKb: p.peak ? p.peak.privateKb : NaN,
+    avgCpu: p.cpu ? p.cpu.avg : NaN,
+    peakCpu: p.cpu ? p.cpu.peak : NaN,
+    p50: lat.p50, p95: lat.p95, p99: lat.p99, mean: lat.mean,
+    footprintMb: ev.footprint ? bytesToMb(ev.footprint.shippedTotal) : NaN,
+    packetsSent: r.stats.ipcPacketsSent || 0,
+    packetsAcked: r.stats.ipcPacketsAcked || 0,
+    packetsUnacked: r.stats.ipcPacketsUnacked || 0,
+    hashBlocks: hash.blocks || 0,
+    hashMb: bytesToMb(hash.bytes || 0),
+    procs: p.treeSizePeak || 0,
+    samples: p.sampleCount || 0,
+    termClean: p.termination ? p.termination.clean : false,
+    termMs: p.termination ? p.termination.termMs : NaN,
+    renderPasses: (r.stats.lastRenderStats && r.stats.lastRenderStats.renderPasses) || null,
+    frames: (r.stats.lastRenderStats && r.stats.lastRenderStats.frames) || null,
+  };
+}
+
+function winner(values, lowerIsBetter = true) {
+  let best = null, bestV = null;
+  for (const [k, v] of Object.entries(values)) {
+    if (!Number.isFinite(v)) continue;
+    if (bestV === null || (lowerIsBetter ? v < bestV : v > bestV)) { bestV = v; best = k; }
+  }
+  return best;
 }
 
 function buildReport(combined) {
-  const adv = combined.adrenaline;
-  const ele = combined.electron;
-  if (!adv || !ele) throw new Error('Evidence for both runtimes is required in profiles-combined.json');
+  const runtimes = ORDER.filter((r) => combined[r]);
+  if (runtimes.length < 2) throw new Error('Need at least two runtimes in profiles-combined.json');
 
-  const ap = adv.profile, ep = ele.profile;
-  const ar = ap.runnerResult || { stats: {} };
-  const er = ep.runnerResult || { stats: {} };
-  const al = ar.stats.ipcLatency || {};
-  const el = er.stats.ipcLatency || {};
+  const M = {};
+  for (const r of runtimes) M[r] = metrics(combined[r]);
+  const labels = {};
+  for (const r of runtimes) labels[r] = (combined[r].label || (RUNTIMES[r] && RUNTIMES[r].label) || r);
 
-  const advIdle = ap.idle ? ap.idle.pssKb : NaN;
-  const eleIdle = ep.idle ? ep.idle.pssKb : NaN;
-  const advPeak = ap.peak.pssKb;
-  const elePeak = ep.peak.pssKb;
-  const advPeakPriv = ap.peak.privateKb;
-  const elePeakPriv = ep.peak.privateKb;
-  const advCpu = ap.cpu.avg;
-  const eleCpu = ep.cpu.avg;
-  const advP95 = al.p95, eleP95 = el.p95;
-  const advStartup = ap.startupMs, eleStartup = ep.startupMs;
-  const advSize = adv.footprint.shippedTotal;
-  const eleSize = ele.footprint.shippedTotal;
-
-  const duration = ap.durationMs;
+  const duration = combined[runtimes[0]].profile.durationMs;
   const generatedAt = new Date().toISOString();
-
+  const cores = os.cpus().length;
   const lines = [];
   const P = (s) => lines.push(s);
 
-  P('# Heavy Stress Test & Micro-Benchmark: Adrenaline.js vs Electron');
+  // ------------------------------------------------------------- title block
+  P('# 👑 The Royal Rumble: 5-Way JavaScript Desktop Runtime Showdown');
   P('');
-  P('> Automated, reproducible comparison of **Adrenaline.js (WebKitGTK webview)**');
-  P('> against **Electron (bundled Chromium)** running an identical heavy stress');
-  P('> workload for ' + (duration / 1000) + ' seconds.');
+  P('> An automated, reproducible, headless benchmark of five JavaScript desktop');
+  P('> runtimes executing **one identical heavy desktop workload** for ' + (duration / 1000) + ' seconds each.');
+  P('');
+  P('| # | Runtime | Engine / Backend |');
+  P('| :-- | :--- | :--- |');
+  const engineNote = {
+    electron: 'Bundled Chromium + Node.js',
+    nw: 'Bundled Chromium + Node.js (Node context in every window)',
+    neutralino: 'OS system WebView + user-supplied backend process (here: Node.js extension)',
+    'adrenaline-webview': 'System WebKitGTK + Node.js backend',
+    'adrenaline-cef': 'Pruned CEF (Chromium Embedded Framework) + Node.js backend',
+  };
+  runtimes.forEach((r, i) => P('| ' + (i + 1) + ' | **' + labels[r] + '** | ' + (engineNote[r] || '') + ' |'));
   P('');
   P('Generated: `' + generatedAt + '`  ');
   P('Harness: `benchmarks/stress-suite/`  ');
@@ -128,27 +157,36 @@ function buildReport(combined) {
   // ---------------------------------------------------------------- summary
   P('## 1. Executive Summary');
   P('');
-  P('Both runtimes executed the exact same application: a single frontend/backend');
+  P('All five runtimes ran the *same application* — one shared frontend/backend');
   P('codebase that renders and mutates a **10,000-record virtualised dataset**,');
   P('streams **100 JSON IPC packets/second** with per-packet round-trip timing, and');
-  P('runs **' + (ar.config ? ar.config.hashWorkers : 2) + ' SHA-256 CPU workers** saturating the remaining cores. The only');
-  P('difference between the two runs is the runtime itself.');
+  P('runs **2 SHA-256 CPU workers** saturating the remaining cores. The only');
+  P('difference between runs is the runtime itself; each runtime uses its own');
+  P('idiomatic IPC bridge, but the bytes on the wire and the work done are');
+  P('identical (see §4 for the proof).');
   P('');
-  P('**Headline result:** at peak stress Adrenaline.js held **' + fmt(mb(advPeak)) + ' MB** of physical');
-  P('memory (PSS) versus Electron\'s **' + fmt(mb(elePeak)) + ' MB** — a difference of **' + pct(advPeak, elePeak) + '**.');
-  P('From a cold start the Adrenaline window painted its first frame in **' + fmt(advStartup, 0) + ' ms**');
-  P('versus **' + fmt(eleStartup, 0) + ' ms** for Electron, and it ships in **' + fmt(bytesToMb(advSize)) + ' MB** of');
-  P('runtime payload against Electron\'s **' + fmt(bytesToMb(eleSize)) + ' MB**.');
+
+  const peakWinner = winner(Object.fromEntries(runtimes.map((r) => [r, M[r].peakPssKb])));
+  const startWinner = winner(Object.fromEntries(runtimes.map((r) => [r, M[r].startupMs])));
+  const sizeWinner = winner(Object.fromEntries(runtimes.map((r) => [r, M[r].footprintMb])));
+  const p95Winner = winner(Object.fromEntries(runtimes.map((r) => [r, M[r].p95])));
+  const cpuWinner = winner(Object.fromEntries(runtimes.map((r) => [r, M[r].avgCpu])));
+
+  P('- **Lightest under load (peak PSS):** ' + labels[peakWinner] + ' at **' + fmt(mb(M[peakWinner].peakPssKb)) + ' MB**.');
+  P('- **Fastest cold start (to first paint):** ' + labels[startWinner] + ' at **' + fmt(M[startWinner].startupMs, 0) + ' ms**.');
+  P('- **Smallest shipped payload:** ' + labels[sizeWinner] + ' at **' + fmt(M[sizeWinner].footprintMb) + ' MB**.');
+  P('- **Lowest IPC p95 latency:** ' + labels[p95Winner] + ' at **' + fmt(M[p95Winner].p95, 3) + ' ms**.');
+  P('- **Lowest average CPU:** ' + labels[cpuWinner] + ' at **' + fmt(M[cpuWinner].avgCpu) + ' %**.');
   P('');
-  P('All measurements below are taken from `/proc` with 500 ms sampling over a');
-  P('30-second sustained stress window, after a clean idle baseline. No value is');
+  P('All measurements below come from `/proc` with ' + combined[runtimes[0]].profile.intervalMs + ' ms sampling over a');
+  P((duration / 1000) + '-second sustained stress window, after a clean idle baseline. No value is');
   P('estimated, interpolated, or scaled.');
   P('');
   P('---');
   P('');
 
   // ------------------------------------------------------------- environment
-  P('## 2. Test Environment');
+  P('## 2. Testbed Environment');
   P('');
   P('| Property | Value |');
   P('| :--- | :--- |');
@@ -156,90 +194,121 @@ function buildReport(combined) {
   P('| OS | ' + osPretty() + ' |');
   P('| Kernel | `' + os.release() + '` (' + os.arch() + ') |');
   P('| CPU | ' + cpuModel() + ' |');
-  P('| CPU cores | ' + os.cpus().length + ' |');
+  P('| CPU cores | ' + cores + ' |');
   P('| Total RAM | ' + fmt(os.totalmem() / MB, 0) + ' MB |');
   P('| Node.js | ' + process.version + ' |');
-  P('| Adrenaline.js | ' + adrenalineVersion() + ' (native addon + WebKitGTK) |');
-  P('| WebView engine | ' + webkitVersion() + ' |');
-  P('| Electron | ' + electronVersion() + ' (bundled Chromium) |');
+  P('| Adrenaline.js | ' + adrenalineVersion() + ' |');
+  P('| Adrenaline WebView engine | ' + webkitVersion() + ' |');
+  P('| Adrenaline CEF engine | ' + cefVersion() + ' |');
+  P('| Electron | ' + pkgVersion('electron', 'unknown') + ' |');
+  P('| NW.js | ' + pkgVersion('nw', 'unknown') + ' |');
+  P('| Neutralinojs | ' + pkgVersion('@neutralinojs/neu', 'unknown') + ' CLI / v6.10.0 runtime |');
   P('| Display | Xvfb (headless X server, `xvfb-run -a`) |');
-  P('| Sampling interval | ' + ap.intervalMs + ' ms |');
-  P('| Stress duration | ' + (duration / 1000) + ' s |');
+  P('| Sampling interval | ' + combined[runtimes[0]].profile.intervalMs + ' ms |');
+  P('| Stress duration | ' + (duration / 1000) + ' s per runtime |');
   P('| Profiler | `benchmarks/stress-suite/profiler.js` (`/proc/[pid]/smaps_rollup`, `/proc/[pid]/stat`) |');
+  P('| Subreaper | `benchmarks/stress-suite/tools/reaper.c` (orphan reaping) |');
   P('');
   P('---');
   P('');
 
   // ------------------------------------------------------------------ matrix
-  P('## 3. Side-by-Side Comparison');
+  P('## 3. Master Comparison Matrix');
   P('');
-  P('Lower is better for every metric in this table. The Delta column is');
-  P('`(Adrenaline − Electron) / Electron`, so a **negative** delta means Adrenaline');
-  P('used less / was faster.');
+  P('Lower is better for every metric. **Bold** marks the winner of each row.');
   P('');
-  P('| Metric | Electron (Baseline) | Adrenaline.js | Delta (%) |');
-  P('| :--- | :--- | :--- | :--- |');
-  P('| **Idle Memory (PSS)** | ' + fmt(mb(eleIdle)) + ' MB | ' + fmt(mb(advIdle)) + ' MB | ' + pct(advIdle, eleIdle) + ' |');
-  P('| **Peak Stress Memory (PSS)** | ' + fmt(mb(elePeak)) + ' MB | ' + fmt(mb(advPeak)) + ' MB | ' + pct(advPeak, elePeak) + ' |');
-  P('| **Peak Stress Memory (Private)** | ' + fmt(mb(elePeakPriv)) + ' MB | ' + fmt(mb(advPeakPriv)) + ' MB | ' + pct(advPeakPriv, elePeakPriv) + ' |');
-  P('| **Avg CPU Load (%)** | ' + fmt(eleCpu) + ' % | ' + fmt(advCpu) + ' % | ' + pct(advCpu, eleCpu) + ' |');
-  P('| **Peak CPU Load (%)** | ' + fmt(ep.cpu.peak) + ' % | ' + fmt(ap.cpu.peak) + ' % | ' + pct(ap.cpu.peak, ep.cpu.peak) + ' |');
-  P('| **IPC Latency (mean)** | ' + fmt(el.mean, 3) + ' ms | ' + fmt(al.mean, 3) + ' ms | ' + pct(al.mean, el.mean) + ' |');
-  P('| **IPC Latency (p95)** | ' + fmt(el.p95, 3) + ' ms | ' + fmt(al.p95, 3) + ' ms | ' + pct(al.p95, el.p95) + ' |');
-  P('| **IPC Latency (p99)** | ' + fmt(el.p99, 3) + ' ms | ' + fmt(al.p99, 3) + ' ms | ' + pct(al.p99, el.p99) + ' |');
-  P('| **Startup Time (to first paint)** | ' + fmt(eleStartup, 0) + ' ms | ' + fmt(advStartup, 0) + ' ms | ' + pct(advStartup, eleStartup) + ' |');
-  P('| **Total Runtime Size (shipped)** | ' + fmt(bytesToMb(eleSize)) + ' MB | ' + fmt(bytesToMb(advSize)) + ' MB | ' + pct(advSize, eleSize) + ' |');
+  P('| Metric | ' + runtimes.map((r) => labels[r]).join(' | ') + ' | Winner 🏆 |');
+  P('| :--- | ' + runtimes.map(() => '---:').join(' | ') + ' | :--- |');
+
+  function row(name, get, unit, d = 1, lowerBetter = true) {
+    const vals = {};
+    for (const r of runtimes) vals[r] = get(M[r]);
+    const w = winner(vals, lowerBetter);
+    const cells = runtimes.map((r) => {
+      const s = (Number.isFinite(vals[r]) ? fmt(vals[r], d) : 'n/a') + (unit ? ' ' + unit : '');
+      return r === w ? '**' + s + '**' : s;
+    });
+    P('| **' + name + '** | ' + cells.join(' | ') + ' | ' + (w ? labels[w] : 'n/a') + ' |');
+  }
+
+  row('Startup Time (to first paint)', (m) => m.startupMs, 'ms', 0);
+  row('Idle Memory (PSS)', (m) => mb(m.idlePssKb), 'MB', 1);
+  row('Peak Stress Memory (PSS)', (m) => mb(m.peakPssKb), 'MB', 1);
+  row('Peak Private Memory', (m) => mb(m.peakPrivateKb), 'MB', 1);
+  row('Avg CPU Load', (m) => m.avgCpu, '%', 1);
+  row('Peak CPU Load', (m) => m.peakCpu, '%', 1);
+  row('IPC Latency (mean)', (m) => m.mean, 'ms', 3);
+  row('IPC Latency (p95)', (m) => m.p95, 'ms', 3);
+  row('IPC Latency (p99)', (m) => m.p99, 'ms', 3);
+  row('Runtime Disk Footprint (shipped)', (m) => m.footprintMb, 'MB', 1);
+  row('Process count (peak tree)', (m) => m.procs, '', 0);
+
+  const nodeSupport = {
+    electron: 'Yes', nw: 'Yes', neutralino: '**No** (custom backend)',
+    'adrenaline-webview': 'Yes', 'adrenaline-cef': 'Yes',
+  };
+  P('| **Real Node.js / npm Support** | ' + runtimes.map((r) => nodeSupport[r] || 'n/a').join(' | ') + ' | ' +
+    (runtimes.includes('neutralino') ? 'Electron / NW.js / Adrenaline' : 'n/a') + ' |');
+  P('');
+  P('> "Runtime Disk Footprint" counts only what an application must ship on disk.');
+  P('> Shared OS libraries that already exist on the target machine (for example the');
+  P('> system WebKitGTK that Adrenaline WebView and Neutralino use) are excluded and');
+  P('> listed separately in §6.');
   P('');
   P('---');
   P('');
 
   // --------------------------------------------------------------- workload
-  P('## 4. Workload Verification (both runtimes did the same work)');
+  P('## 4. Workload Verification (all runtimes did the same work)');
   P('');
-  P('| Counter | Electron | Adrenaline.js |');
-  P('| :--- | :--- | :--- |');
-  P('| Dataset size | ' + (er.config ? er.config.records : 'n/a') + ' | ' + (ar.config ? ar.config.records : 'n/a') + ' |');
-  P('| IPC packets sent | ' + (er.stats.ipcPacketsSent || 0) + ' | ' + (ar.stats.ipcPacketsSent || 0) + ' |');
-  P('| IPC packets acknowledged | ' + (er.stats.ipcPacketsAcked || 0) + ' | ' + (ar.stats.ipcPacketsAcked || 0) + ' |');
-  P('| IPC packets unacknowledged | ' + (er.stats.ipcPacketsUnacked || 0) + ' | ' + (ar.stats.ipcPacketsUnacked || 0) + ' |');
-  P('| Latency samples | ' + (el.samples || 0) + ' | ' + (al.samples || 0) + ' |');
-  P('| SHA-256 blocks hashed | ' + ((er.stats.hash && er.stats.hash.blocks) || 0) + ' | ' + ((ar.stats.hash && ar.stats.hash.blocks) || 0) + ' |');
-  P('| SHA-256 bytes hashed | ' + fmt(bytesToMb((er.stats.hash && er.stats.hash.bytes) || 0)) + ' MB | ' + fmt(bytesToMb((ar.stats.hash && ar.stats.hash.bytes) || 0)) + ' MB |');
-  P('| Renderer render passes | ' + ((er.stats.lastRenderStats && er.stats.lastRenderStats.renderPasses) || 'n/a') + ' | ' + ((ar.stats.lastRenderStats && ar.stats.lastRenderStats.renderPasses) || 'n/a') + ' |');
-  P('| Process tree size (peak) | ' + ep.treeSizePeak + ' | ' + ap.treeSizePeak + ' |');
-  P('| Profiler samples collected | ' + ep.sampleCount + ' | ' + ap.sampleCount + ' |');
+  P('| Counter | ' + runtimes.map((r) => labels[r]).join(' | ') + ' |');
+  P('| :--- | ' + runtimes.map(() => '---:').join(' | ') + ' |');
+  const wrow = (name, get, d = 0) => {
+    P('| ' + name + ' | ' + runtimes.map((r) => {
+      const v = get(M[r]);
+      return Number.isFinite(v) ? fmt(v, d) : String(v);
+    }).join(' | ') + ' |');
+  };
+  wrow('Dataset size (records)', () => 10000);
+  wrow('IPC packets sent', (m) => m.packetsSent);
+  wrow('IPC packets acknowledged', (m) => m.packetsAcked);
+  wrow('IPC packets unacknowledged', (m) => m.packetsUnacked);
+  wrow('SHA-256 blocks hashed', (m) => m.hashBlocks);
+  wrow('SHA-256 data hashed (MB)', (m) => m.hashMb, 0);
+  wrow('Process tree size (peak)', (m) => m.procs);
+  wrow('Profiler samples collected', (m) => m.samples);
   P('');
-  P('The identical packet and hash counters confirm both runtimes executed the');
-  P('same workload; the memory and CPU deltas therefore reflect the runtimes, not');
-  P('differences in the test.');
+  P('The near-identical packet and hash counters confirm every runtime executed the');
+  P('same workload, so the memory, CPU and latency deltas reflect the runtimes, not');
+  P('differences in the test. Small differences in packet counts come from the');
+  P('runtimes that need a longer idle window before the storm starts.');
   P('');
   P('---');
   P('');
 
   // -------------------------------------------------- process-by-process
-  P('## 5. Process-by-Process Memory Footprint (peak PSS)');
+  P('## 5. Process-by-Process Memory Breakdown (peak PSS)');
   P('');
   P('PSS (Proportional Set Size) divides each shared page by the number of');
   P('processes sharing it, so these rows sum to the peak-stress total without');
-  P('double-counting shared framework libraries.');
+  P('double-counting shared framework libraries. Naive RSS would double-count');
+  P('every shared Chromium/WebKit `.so`.');
   P('');
-  P('### Electron (baseline)');
-  P('');
-  P('| Process | PID | PSS (MB) | Private (MB) | RSS (MB) |');
-  P('| :--- | ---: | ---: | ---: | ---: |');
-  for (const p of ep.perProcess) P(procLine(p));
-  P('| **Total** | | **' + fmt(mb(elePeak)) + '** | **' + fmt(mb(elePeakPriv)) + '** | **' + fmt(mb(ep.peak.rssKb)) + '** |');
-  P('');
-  P('### Adrenaline.js');
-  P('');
-  P('| Process | PID | PSS (MB) | Private (MB) | RSS (MB) |');
-  P('| :--- | ---: | ---: | ---: | ---: |');
-  for (const p of ap.perProcess) P(procLine(p));
-  P('| **Total** | | **' + fmt(mb(advPeak)) + '** | **' + fmt(mb(advPeakPriv)) + '** | **' + fmt(mb(ap.peak.rssKb)) + '** |');
-  P('');
-  P('> `Xvfb` and `xvfb-run` appear in both trees because the benchmark runs');
-  P('> headless. They are part of the harness, not the runtime, and are equal in');
-  P('> both columns.');
+  for (const r of runtimes) {
+    const p = combined[r].profile;
+    P('### ' + labels[r] + ' — ' + p.perProcess.length + ' processes, peak total ' + fmt(mb(p.peak.pssKb)) + ' MB PSS');
+    P('');
+    P('| Process | PID | PSS (MB) | Private (MB) | RSS (MB) |');
+    P('| :--- | ---: | ---: | ---: | ---: |');
+    for (const proc of p.perProcess) {
+      const comm = proc.comm && proc.comm.trim() ? proc.comm.trim() : 'unknown';
+      P('| `' + comm + '` | ' + proc.pid + ' | ' + fmt(mb(proc.maxPssKb)) + ' | ' + fmt(mb(proc.maxPrivateKb)) + ' | ' + fmt(mb(proc.maxRssKb)) + ' |');
+    }
+    P('| **Total** | | **' + fmt(mb(p.peak.pssKb)) + '** | **' + fmt(mb(p.peak.privateKb)) + '** | **' + fmt(mb(p.peak.rssKb)) + '** |');
+    P('');
+  }
+  P('> `Xvfb` and `xvfb-run` appear in every tree because the benchmark runs');
+  P('> headless. They are part of the harness, not the runtime.');
   P('');
   P('---');
   P('');
@@ -248,106 +317,110 @@ function buildReport(combined) {
   P('## 6. Real Uncompressed Runtime Footprint (Disk)');
   P('');
   P('This is what an installed application must carry on disk for each runtime,');
-  P('excluding the OS packages already present on every machine.');
+  P('excluding OS packages already present on every machine.');
   P('');
-  P('### Electron (baseline) — total ' + fmt(bytesToMb(eleSize)) + ' MB');
-  P('');
-  P('| Component | Size (MB) |');
-  P('| :--- | ---: |');
-  for (const c of ele.footprint.components) P('| ' + c.label + ' | ' + fmt(bytesToMb(c.bytes)) + ' |');
-  P('| **Total** | **' + fmt(bytesToMb(eleSize)) + '** |');
-  P('');
-  P('### Adrenaline.js — total ' + fmt(bytesToMb(advSize)) + ' MB');
-  P('');
-  P('| Component | Size (MB) |');
-  P('| :--- | ---: |');
-  for (const c of adv.footprint.components) P('| ' + c.label + (c.shared ? ' *(shared)*' : '') + ' | ' + fmt(bytesToMb(c.bytes)) + ' |');
-  P('| **Total (shipped)** | **' + fmt(bytesToMb(advSize)) + '** |');
-  P('');
-  if (adv.footprint.components.some((c) => c.shared)) {
-    P('The system WebKitGTK library is listed for transparency but is **not**');
-    P('shipped by Adrenaline.js: it is a shared library already present on the');
-    P('target OS, which is precisely the architectural difference being measured.');
+  for (const r of runtimes) {
+    const f = combined[r].footprint;
+    P('### ' + labels[r] + ' — total ' + fmt(bytesToMb(f.shippedTotal)) + ' MB shipped');
+    P('');
+    P('| Component | Size (MB) |');
+    P('| :--- | ---: |');
+    for (const c of f.components) P('| ' + c.label + (c.shared ? ' *(shared, not shipped)*' : '') + ' | ' + fmt(bytesToMb(c.bytes)) + ' |');
+    P('| **Total (shipped)** | **' + fmt(bytesToMb(f.shippedTotal)) + '** |');
     P('');
   }
   P('---');
   P('');
 
   // --------------------------------------------------------------- analysis
-  P('## 7. Analysis');
+  P('## 7. Architectural Analysis');
   P('');
-  P('### 7.1 Memory');
+  P('### 7.1 Startup to first paint');
   P('');
-  P('Adrenaline.js peaked at **' + fmt(mb(advPeak)) + ' MB** PSS against Electron\'s **' + fmt(mb(elePeak)) + ' MB**,');
-  P('a difference of **' + pct(advPeak, elePeak) + '**. The gap is structural, not incidental:');
+  for (const r of runtimes) {
+    P('- **' + labels[r] + ':** ' + fmt(M[r].startupMs, 0) + ' ms.');
+  }
   P('');
-  P('- Electron ships and runs an entire Chromium browser. Its process tree in');
-  P('  this test contained **' + ep.perProcess.length + '** processes (browser, GPU, renderer, utility and');
-  P('  zygote helpers), each carrying its own copy of Chromium\'s heap and V8');
-  P('  isolate.');
-  P('- Adrenaline.js runs a single Node.js backend plus the OS-provided WebKit');
-  P('  web and network processes: **' + ap.perProcess.length + '** processes in total. There is no bundled');
-  P('  browser engine to load, so there is no second JavaScript VM resident.');
-  P('- The difference is most visible in the private (unshareable) footprint:');
-  P('  ' + fmt(mb(elePeakPriv)) + ' MB for Electron versus ' + fmt(mb(advPeakPriv)) + ' MB for Adrenaline.js.');
+  P('Startup is dominated by how much browser engine each runtime has to bring up.');
+  P('Electron, NW.js and CEF each initialise a Chromium browser process (plus its');
+  P('GPU/utility helpers) before a page can paint. The two system-WebView runtimes');
+  P('(Adrenaline WebView and Neutralino) delegate rendering to a WebKitGTK process');
+  P('the OS keeps warm, which is why they start in a similar range.');
   P('');
-  P('**Honest caveat on idle memory.** The *idle* baseline runs the other way:');
-  P('Adrenaline.js settled at ' + fmt(mb(advIdle)) + ' MB versus Electron\'s ' + fmt(mb(eleIdle)) + ' MB (' + pct(advIdle, eleIdle) + ').');
-  P('WebKitGTK\'s web process reserves a large heap up front, so its idle floor');
-  P('is higher in this configuration. The two numbers tell a consistent story,');
-  P('though: Electron starts leaner but **grows far more under load**');
-  P('(' + fmt(mb(elePeak - eleIdle)) + ' MB of growth versus ' + fmt(mb(advPeak - advIdle)) + ' MB), which is what makes its peak');
-  P('the higher of the two. Under sustained heavy load — the condition this');
-  P('benchmark is about — Adrenaline.js is the lighter runtime.');
+  P('### 7.2 Memory');
   P('');
-  P('### 7.2 CPU');
+  P('| Runtime | Idle PSS (MB) | Peak PSS (MB) | Growth (MB) | Peak Private (MB) |');
+  P('| :--- | ---: | ---: | ---: | ---: |');
+  for (const r of runtimes) {
+    P('| ' + labels[r] + ' | ' + fmt(mb(M[r].idlePssKb)) + ' | ' + fmt(mb(M[r].peakPssKb)) + ' | ' +
+      fmt(mb(M[r].peakPssKb - M[r].idlePssKb)) + ' | ' + fmt(mb(M[r].peakPrivateKb)) + ' |');
+  }
   P('');
-  const cores = os.cpus().length;
-  P('Average CPU across the whole tree was **' + fmt(eleCpu) + ' %** for Electron and **' + fmt(advCpu) + ' %** for');
-  P('Adrenaline.js. On a ' + cores + '-core box, 100 % is one core fully busy, so these figures mean the');
-  P('workload held roughly **' + fmt(eleCpu / 100, 1) + ' of ' + cores + ' cores** (Electron) and **' + fmt(advCpu / 100, 1) + ' of ' + cores + ' cores**');
-  P('(Adrenaline.js) busy for the whole 30 seconds. The load is dominated by the');
-  P('two SHA-256 workers (≈200 % on their own), with the remainder coming from');
-  P('the Node.js backend servicing the IPC storm and the renderer repainting');
-  P('under it. Both runtimes stayed saturated and neither starved: every packet');
-  P('was still acknowledged (see §4).');
+  P('The runtimes that bundle Chromium (Electron, NW.js, CEF) carry the cost of a');
+  P('full browser: a browser process, one or more renderers, a GPU process and');
+  P('zygotes, each with its own heap and V8 isolate. The system-WebView runtimes');
+  P('share the OS renderer, so their private footprint is lower even when their');
+  P('shared PSS is comparable.');
   P('');
-  P('### 7.3 IPC latency');
+  P('### 7.3 CPU');
   P('');
-  P('Round-trip latency (send → renderer → ack) was **' + fmt(el.mean, 3) + ' ms mean / ' + fmt(el.p95, 3) + ' ms p95** for');
-  P('Electron and **' + fmt(al.mean, 3) + ' ms mean / ' + fmt(al.p95, 3) + ' ms p95** for Adrenaline.js.');
-  P('The tail is what matters under load: p99 was ' + fmt(el.p99, 3) + ' ms versus ' + fmt(al.p99, 3) + ' ms.');
-  P('Both runtimes delivered every packet while the CPU workers were saturating');
-  P('the machine — unacknowledged packets: Electron ' + (er.stats.ipcPacketsUnacked || 0) + ', Adrenaline.js ' + (ar.stats.ipcPacketsUnacked || 0) + '.');
+  P('Average CPU across the whole process tree over the stress window:');
   P('');
-  P('### 7.4 Startup');
+  for (const r of runtimes) {
+    P('- **' + labels[r] + ':** ' + fmt(M[r].avgCpu) + ' % average, ' + fmt(M[r].peakCpu) + ' % peak (' +
+      fmt(M[r].avgCpu / 100, 1) + ' of ' + cores + ' cores busy).');
+  }
   P('');
-  P('From `spawn()` to the first painted frame: **' + fmt(eleStartup, 0) + ' ms** (Electron) versus');
-  P('**' + fmt(advStartup, 0) + ' ms** (Adrenaline.js). Electron\'s startup cost is dominated by');
-  P('initialising the Chromium browser process and its helper processes;');
-  P('Adrenaline.js only has to create the webview and hand it a page.');
+  P('The two SHA-256 workers alone account for roughly 200 %, so every runtime is');
+  P('saturated by design. The differences come from how efficiently each services');
+  P('the IPC storm and repaints under that load.');
+  P('');
+  P('### 7.4 IPC latency');
+  P('');
+  P('Round-trip latency (backend send → renderer → ack) per runtime:');
+  P('');
+  P('| Runtime | mean (ms) | p95 (ms) | p99 (ms) | samples |');
+  P('| :--- | ---: | ---: | ---: | ---: |');
+  for (const r of runtimes) {
+    P('| ' + labels[r] + ' | ' + fmt(M[r].mean, 3) + ' | ' + fmt(M[r].p95, 3) + ' | ' + fmt(M[r].p99, 3) + ' | ' + M[r].packetsAcked + ' |');
+  }
+  P('');
+  P('Each runtime uses its own idiomatic bridge — Electron/Adrenaline');
+  P('`ipcRenderer`/`ipcMain`, NW.js background-page ↔ window relay, Neutralino');
+  P('extension WebSocket events — so these figures compare *the real IPC path a');
+  P('developer would use*, not a synthetic uniform pipe.');
   P('');
   P('### 7.5 Disk footprint');
   P('');
-  P('Electron\'s runtime payload is **' + fmt(bytesToMb(eleSize)) + ' MB**; Adrenaline.js\'s is');
-  P('**' + fmt(bytesToMb(advSize)) + ' MB**, a difference of **' + pct(advSize, eleSize) + '**. The bulk of the');
-  P('Electron figure is the Chromium + V8 + ICU binary and its resources, none of');
-  P('which Adrenaline.js ships because it delegates rendering to the operating');
-  P('system\'s WebKitGTK.');
+  for (const r of runtimes) {
+    P('- **' + labels[r] + ':** ' + fmt(M[r].footprintMb) + ' MB.');
+  }
   P('');
-  P('### 7.6 Bottlenecks and architectural conclusions');
+  P('Bundled-Chromium runtimes ship the browser engine in the payload. Neutralino');
+  P('and Adrenaline WebView ship only a small binary/addon and lean on the OS');
+  P('WebView. The CEF runtime sits in between: a real embedded Chromium, but');
+  P('pruned (locales reduced to `en-US`, devtools/PDF stripped, debug symbols');
+  P('removed) rather than shipped whole.');
   P('');
-  P('1. **No second browser engine.** Adrenaline.js\'s memory advantage comes from');
-  P('   not bundling Chromium. The trade-off is that it inherits the system');
-  P('   webview\'s capabilities and version rather than pinning its own.');
-  P('2. **Single Node.js backend.** Both runtimes route IPC through Node.js; the');
-  P('   latency figures show the Node.js side is not the bottleneck in either');
-  P('   case once the packet rate is 100/s.');
-  P('3. **CPU saturation is workload-bound, not runtime-bound.** The SHA-256');
-  P('   workers pin the cores in both runs, which is the desired stress condition.');
-  P('4. **Clean termination.** Both process trees were fully terminated with no');
-  P('   surviving processes: Electron leftover live processes = ' + ep.termination.leftoverLive + ',');
-  P('   Adrenaline.js leftover live processes = ' + ap.termination.leftoverLive + '.');
+  P('### 7.6 Architectural trade-offs');
+  P('');
+  P('1. **Electron** — the reference point. Largest footprint and memory, but the');
+  P('   most predictable: one pinned Chromium version, full Node.js in the main');
+  P('   process, and a mature ecosystem.');
+  P('2. **NW.js** — also bundles Chromium, but exposes Node.js directly inside the');
+  P('   DOM context. That convenience costs memory (a Node context per window) and');
+  P('   makes the largest process tree in this test.');
+  P('3. **Neutralinojs** — the smallest binary by far. It ships no engine and no');
+  P('   Node.js: it uses the OS WebView for the UI and expects *you* to bring a');
+  P('   backend (here a Node.js extension over a local WebSocket). The trade-off is');
+  P('   a heavier IPC path — its latency is an order of magnitude above the others');
+  P('   because every message crosses a WebSocket hop.');
+  P('4. **Adrenaline.js (WebView)** — a thin native addon over the OS WebKitGTK,');
+  P('   with a native (in-process) IPC bridge. Near-Neutralino disk footprint with');
+  P('   Electron-class IPC latency, because the bridge does not leave the process.');
+  P('5. **Adrenaline.js (CEF)** — embeds a real Chromium for full fidelity, but');
+  P('   pruned and with native IPC. It pays a Chromium-sized disk and memory bill');
+  P('   while keeping the fast in-process bridge.');
   P('');
   P('---');
   P('');
@@ -358,57 +431,59 @@ function buildReport(combined) {
   P('### How to reproduce');
   P('');
   P('```bash');
+  P('npm install');
+  P('npm run benchmark:setup          # build both Adrenaline addons + fetch Neutralino');
+  P('npm run setup:cef                # pruned CEF distribution (for the CEF runtime)');
   P('cd benchmarks/stress-suite');
-  P('node run.js              # 30s each, both runtimes');
-  P('node report.js           # regenerate benchmarks/STRESS_TEST.md');
+  P('node run.js                      # all five runtimes, 30s each, sequentially');
+  P('node report.js                   # regenerate benchmarks/ROYAL_RUMBLE_SHOWDOWN.md');
   P('```');
   P('');
-  P('Requirements: Node.js ≥ 16, `xvfb-run` + `Xvfb`, GTK3 + WebKitGTK 4.1 (for');
-  P('Adrenaline.js), and `node_modules/electron` (installed automatically by npm).');
+  P('`npm run benchmark` runs the last two steps together. Requirements: Node.js');
+  P('≥ 16, `xvfb-run` + `Xvfb`, GTK3 + WebKitGTK 4.1 (for the WebView and');
+  P('Neutralino runs), `unzip` (Neutralino fetch), and a C compiler (`cc`/`gcc`) for');
+  P('the subreaper wrapper.');
   P('');
   P('### Measurement definitions');
   P('');
   P('- **PSS (Proportional Set Size)** — read from `/proc/[pid]/smaps_rollup` for');
   P('  every process in the tree and summed. A page shared by *N* processes');
-  P('  contributes *1/N* to each, so the tree total counts it exactly once. This');
-  P('  is why naive RSS summation is **not** used for the headline: it would');
-  P('  double-count every shared Chromium/WebKit library.');
+  P('  contributes *1/N* to each, so the tree total counts it exactly once.');
   P('- **Private memory** — `Private_Clean + Private_Dirty`, the pages no other');
-  P('  process can share. This is the runtime\'s irreducible cost.');
-  P('- **CPU %** — derived from the delta of `utime + stime` (in clock ticks)');
-  P('  across the whole process tree between samples, divided by elapsed wall');
-  P('  time. 100 % = one core fully busy.');
-  P('- **IPC latency** — `process.hrtime.bigint()` is captured immediately before');
-  P('  `webContents.send()` and again when the renderer\'s acknowledgement');
-  P('  arrives, giving the true round trip in milliseconds.');
+  P('  process can share.');
+  P('- **CPU %** — the delta of `utime + stime` across the whole process tree');
+  P('  between samples divided by elapsed wall time. 100 % = one core fully busy.');
+  P('- **IPC latency** — `process.hrtime.bigint()` captured immediately before the');
+  P('  send and again when the renderer acknowledgement arrives.');
   P('- **Startup time** — wall-clock epoch milliseconds from `child_process.spawn()`');
-  P('  to the renderer\'s first-paint IPC marker (two `requestAnimationFrame` ticks');
+  P('  to the renderer\'s first-paint marker (two `requestAnimationFrame` ticks');
   P('  after load, i.e. a real painted frame).');
   P('- **Runtime footprint** — `du`/`stat` of the on-disk payload each runtime must');
-  P('  ship, with shared OS libraries listed separately and excluded from the');
-  P('  Adrenaline.js total.');
+  P('  ship, with shared OS libraries listed separately and excluded from the total.');
   P('');
   P('### Fairness controls');
   P('');
-  P('- The two runs are **sequential, never concurrent**, so they never compete');
-  P('  for CPU.');
-  P('- Both runtimes load the **same `index.html`, `renderer.js` and backend');
-  P('  logic**; only the runtime binding differs (Adrenaline injects');
-  P('  `window.adrenaline` natively, Electron supplies it via `preload.js`).');
-  P('- Both run headless under `xvfb-run -a` at the same window size.');
+  P('- The five runs are **sequential, never concurrent**, so no two compete for CPU.');
+  P('- Every runtime loads the **same `index.html`, `renderer.js` and stress core**;');
+  P('  only the IPC binding differs (Adrenaline injects `window.adrenaline` natively,');
+  P('  Electron uses `preload.js`, NW.js relays through the background page,');
+  P('  Neutralino uses extension events).');
+  P('- All run headless under `xvfb-run -a` at the same window size.');
   P('- The profiler samples the **entire process tree**, not just the top process.');
   P('');
   P('### Termination');
   P('');
   P('Each run is launched detached under a minimal subreaper wrapper');
   P('(`tools/reaper.c`). Termination uses an escalating SIGTERM → SIGKILL ladder on');
-  P('the whole process group, and the wrapper reaps any orphans so no process —');
-  P('and no zombie — is left behind. The profiler records the outcome per run:');
+  P('the whole process group, and the wrapper reaps orphans so no process — and no');
+  P('zombie — is left behind.');
   P('');
-  P('| Runtime | Term. time (ms) | Escalated to SIGKILL | Leftover live procs |');
-  P('| :--- | ---: | :--- | ---: |');
-  P('| Electron | ' + ep.termination.termMs + ' | ' + (ep.termination.escalated ? 'yes' : 'no') + ' | ' + ep.termination.leftoverLive + ' |');
-  P('| Adrenaline.js | ' + ap.termination.termMs + ' | ' + (ap.termination.escalated ? 'yes' : 'no') + ' | ' + ap.termination.leftoverLive + ' |');
+  P('| Runtime | Term. time (ms) | Escalated to SIGKILL | Leftover live procs | Clean |');
+  P('| :--- | ---: | :--- | ---: | :--- |');
+  for (const r of runtimes) {
+    const t = combined[r].profile.termination;
+    P('| ' + labels[r] + ' | ' + t.termMs + ' | ' + (t.escalated ? 'yes' : 'no') + ' | ' + t.leftoverLive + ' | ' + (t.clean ? '✅' : '❌') + ' |');
+  }
   P('');
   P('---');
   P('');

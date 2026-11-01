@@ -74,6 +74,22 @@ Tested on identical workloads under headless execution: 10,000-record virtualize
 
 ---
 
+## 👑 The Royal Rumble — 5-Way Runtime Showdown
+
+The same harness runs five desktop runtimes through the identical heavy
+workload, sequentially and headless: **Electron**, **NW.js**, **Neutralinojs**,
+**Adrenaline.js (WebView)** and **Adrenaline.js (pruned CEF)**.
+
+```bash
+node benchmarks/stress-suite/run.js      # 30s per runtime, all five
+node benchmarks/stress-suite/report.js   # regenerate the report
+```
+
+*Full matrix, per-process breakdowns, and architectural analysis in
+`benchmarks/ROYAL_RUMBLE_SHOWDOWN.md`.*
+
+---
+
 ## 💻 Code Example
 
 ### Main Process (`main.js`)

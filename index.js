@@ -1,5 +1,5 @@
 const EventEmitter = require('events');
-const native = require('./build/Release/adrenaline.node');
+const native = require('./lib/native');
 const app = require('./lib/app');
 const BrowserWindow = require('./lib/browser-window');
 const ipcMain = require('./lib/ipc-main');

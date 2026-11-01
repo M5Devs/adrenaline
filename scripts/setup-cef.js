@@ -227,6 +227,36 @@ function pruneBuildIntermediates(cefRoot) {
   return { savedBytes };
 }
 
+/**
+ * Strip debug symbols from the shipped CEF shared libraries.
+ *
+ * The official linux64 CEF binaries are built with full DWARF debug info:
+ * libcef.so alone carries ~1 GB of `.debug_*` / `.symtab` sections that no
+ * end-user application ever reads. Stripping them (keeping the dynamic symbol
+ * table, which the dynamic linker needs) shrinks the shipped payload by more
+ * than half without changing runtime behaviour. Idempotent: already-stripped
+ * files report 0 bytes reclaimed.
+ */
+function stripDebugSymbols(cefRoot) {
+  const releaseDir = path.join(cefRoot, 'Release');
+  const libs = ['libcef.so', 'libEGL.so', 'libGLESv2.so', 'libvk_swiftshader.so'];
+  const stripped = [];
+  let savedBytes = 0;
+  for (const name of libs) {
+    const file = path.join(releaseDir, name);
+    if (!fs.existsSync(file)) continue;
+    const before = fs.statSync(file).size;
+    const res = spawnSync('strip', ['--strip-debug', file], { stdio: 'ignore' });
+    if (res.error || res.status !== 0) continue;
+    const after = fs.statSync(file).size;
+    if (after < before) {
+      stripped.push(name);
+      savedBytes += before - after;
+    }
+  }
+  return { stripped, savedBytes };
+}
+
 function writeManifest(cefRoot, manifest) {
   fs.writeFileSync(path.join(cefRoot, 'cef-manifest.json'), JSON.stringify(manifest, null, 2) + '\n');
 }
@@ -310,6 +340,14 @@ async function main() {
     } else {
       log('Config stripping: no removable assets matched the current config.');
     }
+
+    const debugStrip = stripDebugSymbols(CEF_ROOT);
+    if (debugStrip.stripped.length) {
+      log(`Debug symbols stripped from: ${debugStrip.stripped.join(', ')} (${mb(debugStrip.savedBytes)} MB)`);
+    } else {
+      log('Debug symbol stripping: nothing to strip (already stripped).');
+    }
+    strip.debugSymbols = debugStrip;
   } else {
     log('--skip-strip: leaving distribution assets untouched.');
   }
@@ -335,6 +373,7 @@ async function main() {
       localesKept: locales.kept,
       testsRemoved: tests.removed,
       strippedAssets: strip.removed,
+      debugSymbolsStripped: strip.debugSymbols ? strip.debugSymbols.stripped : [],
       modules: resolved.modules,
       generatedAt: new Date().toISOString()
     });
@@ -347,6 +386,7 @@ module.exports = {
   selectLatestStableMinimal,
   pruneLocales,
   removeTests,
+  stripDebugSymbols,
   LOCALE_KEEP,
   INDEX_URL,
   CDN_BASE

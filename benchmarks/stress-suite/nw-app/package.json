@@ -1,0 +1,10 @@
+{
+  "name": "royal-rumble-nw",
+  "version": "1.0.0",
+  "main": "nw-main.js",
+  "nodejs": true,
+  "node-remote": "<all_urls>",
+  "inject_js_start": "nw-inject.js",
+  "window": { "width": 1280, "height": 800, "show": true, "title": "NW.js Royal Rumble" },
+  "chromium-args": "--no-sandbox --disable-gpu --disable-dev-shm-usage --disable-background-timer-throttling --disable-renderer-backgrounding --disable-backgrounding-occluded-windows"
+}

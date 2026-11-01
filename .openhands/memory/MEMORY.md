@@ -44,6 +44,31 @@ node-addon-api), JS surface in `lib/` + `index.js`/`index.mjs`, types `index.d.t
   sum — double-counts shared libs); Private = Private_Clean+Dirty; CPU from
   Σ(utime+stime) ÷ wallclock; IPC round-trip via hrtime; startup = spawn → first paint.
 
+### Royal Rumble (5-way): Electron / NW.js / Neutralinojs / Adrenaline WebView / Adrenaline CEF
+- Registry `runtimes.js` (`commandFor`, `footprintRuntimeFor`); `run.js` loops all
+  five sequentially; `report.js` writes `benchmarks/ROYAL_RUMBLE_SHOWDOWN.md`.
+  Provisioning: `npm run benchmark:setup` (`setup.js`) builds BOTH addons into
+  `.bench-artifacts/adrenaline-{webview,cef}.node` and fetches the Neutralino
+  binary; `npm run setup:cef` fetches/prunes CEF.
+- `lib/native.js` picks the addon: `ADREN_ADDON_PATH` → engine-specific
+  (`adrenaline-cef.node`) → `build/Release/adrenaline.node`. Both engines verified
+  via `ADREN_ADDON_PATH=.bench-artifacts/adrenaline-{webview,cef}.node xvfb-run node test/test.js`.
+- NW.js runner `nw-runner.js` / `nw-app/` (Node context in the DOM); Neutralino
+  uses an **extension** (`neu-app/extensions/rumble/main.js`) over a local
+  WebSocket — that WS hop is why Neutralino IPC latency is ~28 ms vs ~0.6 ms
+  (Electron). Electron cmd needs `--no-sandbox --disable-gpu`; NW needs the app
+  dir as argv[1].
+- CEF cache: the addon creates `$XDG_CACHE_HOME/adrenaline/cef-<pid>` and removes
+  it in `ShutdownWindows`, but under the profiler SIGTERM races that path, so
+  `runtimes.js` sets `ADREN_CEF_CACHE=<suite>/.cef-cache` and `run.js`
+  `cleanupRuntime()` deletes it. A *direct* (non-reaper, non-profiler) CEF run in
+  this image still SIGTRAPs at exit (exit 133, no clean CefShutdown) — the
+  profiler's SIGTERM path is what the benchmark actually uses.
+- Representative 30 s results (same testbed): startup ms e=394 nw=567 neu=530
+  aw=509 ac=382; peak PSS MB e=717 nw=925 neu=486 aw=497 ac=439; IPC p95 ms
+  e=2.2 nw=2.5 neu=50.7 aw=5.5 ac=11.6; shipped MB e=274 nw=511 neu=124 aw=121
+  ac=620. `report.js` derives every table from `profiles-combined.json`.
+
 ### Benchmark environment quirks (each cost real debugging time)
 - Electron MUST launch via its binary (`node_modules/electron/dist/electron`,
   path in `node_modules/electron/path.txt`), not `node`; Adrenaline runs under
