@@ -8,7 +8,9 @@ on:
 
 jobs:
   build-and-test:
-    runs-on: ubuntu-latest
+    # Pinned: ubuntu-latest migrated to 26.04 mid-stream and broke the GTK/WebKit
+    # build (see below). Pin to the LTS image the project is validated on.
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Checkout repository
@@ -23,7 +25,10 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev xvfb scrot
+          # Install the GTK/WebKit development headers explicitly. Do not rely on
+          # libglib2.0-dev being pulled in transitively: on Ubuntu >= 26.04 it is a
+          # metapackage and the GLib headers/.pc files move to libgio-2.0-dev.
+          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev libglib2.0-dev xvfb scrot
 
       - name: Install Node dependencies
         run: npm install
