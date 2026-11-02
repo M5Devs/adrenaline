@@ -19,9 +19,14 @@
 #include <algorithm>
 
 #if ADREN_FEATURE_CEF
+#include <poll.h>
+#endif
+
+#if ADREN_FEATURE_CEF
 #include "cef/adrenaline_app.h"
 #include "cef/adrenaline_client.h"
 #include "cef/adrenaline_url_policy.h"
+#include "cef/adrenaline_wakeup.h"
 #include "include/cef_app.h"
 #include "include/capi/cef_app_capi.h"
 #include "include/cef_browser.h"
@@ -109,6 +114,12 @@ static std::vector<std::shared_ptr<WindowInstance>>& all_windows() {
 }
 static std::mutex g_all_windows_mutex;
 
+// True while at least one CEF window is open. When set, every CEF wake request
+// results in an immediate pump (lowest latency). When no window is open there is
+// no interactive latency to protect, so pumps are throttled to keep an idle app
+// from spinning the CPU.
+static std::atomic<bool> g_cef_active{false};
+
 // Called from OnBeforeClose (engine thread) once a CEF browser has fully closed.
 // Drops the parked references so a closed window does not leak its instance and
 // CefWindow for the life of the process. The webview path keeps parking closed
@@ -126,6 +137,8 @@ void ForgetClosedWindow(const std::shared_ptr<WindowInstance>& instance) {
     }
     // Release the CEF window reference; CEF has already destroyed the browser.
     instance->window = nullptr;
+    // A closed window should not keep the pump in its low-latency (active) mode.
+    g_cef_active = false;
 }
 #endif
 
@@ -154,9 +167,20 @@ EngineState& engine() {
 
 void EngineThreadMain() {
 #if ADREN_FEATURE_CEF
-    // CEF drives its own UI thread via an external message pump: we own the
-    // loop and must call CefDoMessageLoopWork() periodically. Without a sleep
-    // CEF's timers never elapse, so a short pause keeps them ticking.
+    // CEF drives its own UI thread via an external message pump: we own the loop
+    // and must call CefDoMessageLoopWork(). A fixed sleep between pumps would add
+    // that sleep to every IPC round trip, so instead the thread blocks in poll()
+    // on a wake fd and pumps immediately whenever CEF (OnScheduleMessagePumpWork),
+    // the JS thread (a queued task) or the shutdown path signals it. The
+    // `kCefMaxPumpDelayMs` timeout is only a safety net for CEF timers that do
+    // not route through the schedule callback; it does not gate dispatch.
+    constexpr int kCefMaxPumpDelayMs = 16;
+    // While no window is open there is no latency to protect, so only pump this
+    // often (plus whenever an explicit wake arrives).
+    constexpr auto kCefIdlePumpPeriod = std::chrono::milliseconds(100);
+    int wake_fd = adrenaline::SignalEngineWakeup();
+    auto last_pump = std::chrono::steady_clock::now();
+
     for (;;) {
         for (;;) {
             std::function<void()> task;
@@ -178,8 +202,21 @@ void EngineThreadMain() {
             }
         }
 
-        CefDoMessageLoopWork();
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        // Pump now: any queued task has already run, and CEF may have more work.
+        // `active` (a live window) forces a pump on every wake; with no window the
+        // pump is throttled so an idle app does not spin.
+        if (adrenaline::ShouldPumpNow(g_cef_active, last_pump, kCefIdlePumpPeriod)) {
+            CefDoMessageLoopWork();
+        }
+
+        // Then sleep until CEF asks for a pump, a task arrives, or the timeout.
+        pollfd pfd{};
+        pfd.fd = wake_fd;
+        pfd.events = POLLIN;
+        int rc = poll(&pfd, 1, kCefMaxPumpDelayMs);
+        if (rc > 0 && (pfd.revents & POLLIN)) {
+            adrenaline::DrainEngineWakeup(wake_fd);
+        }
     }
 #else
     GMainContext* ctx = g_main_context_default();
@@ -225,7 +262,9 @@ void PushEngineTask(std::function<void()> fn) {
         engine().tasks.push_back(std::move(fn));
     }
 #if ADREN_FEATURE_CEF
-    // The CEF loop wakes on its own; nothing else to signal.
+    // Wake the CEF pump immediately so the task is not delayed until the next
+    // poll timeout.
+    adrenaline::SignalEngineWakeup();
 #else
     g_main_context_wakeup(g_main_context_default());
 #endif
@@ -654,6 +693,9 @@ Napi::Value CreateWindow(const Napi::CallbackInfo& info) {
             window->AddChildView(browser_view);
             window->Show();
 
+            // A window is up: keep the message pump in low-latency (pump on every
+            // wake) mode until the last window closes.
+            g_cef_active = true;
             instance->window = window;
             // `GetBrowser()` may still be null here (creation is asynchronous);
             // OnAfterCreated assigns the browser once it exists. Record it early
@@ -1000,7 +1042,8 @@ void ShutdownWindows() {
         engine().stop = true;
     }
 #if ADREN_FEATURE_CEF
-    // The CEF pump polls on its own; nothing to wake.
+    // Break the pump out of poll() so it observes `stop` immediately.
+    adrenaline::SignalEngineWakeup();
 #else
     g_main_context_wakeup(g_main_context_default());
 #endif

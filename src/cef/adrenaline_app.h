@@ -37,6 +37,10 @@ public:
 
   // CefBrowserProcessHandler methods:
   virtual void OnContextInitialized() override;
+  // CEF asks the embedder's external message pump to run through this hook. We
+  // forward it to the engine thread's wake fd so the pump runs immediately
+  // instead of waiting for the next periodic poll timeout.
+  virtual void OnScheduleMessagePumpWork(int64_t delay_ms) override;
 
   // CefRenderProcessHandler methods:
   virtual void OnContextCreated(CefRefPtr<CefBrowser> browser,

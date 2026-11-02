@@ -85,6 +85,9 @@ private:
   bool is_closing_;
   bool is_ready_;
   bool is_loaded_;
+  // Guards the one-shot idle GC fired after the main frame's first load so it
+  // runs once per browser rather than on every reload.
+  bool idle_gc_done_;
   std::string current_title_;
   std::function<void(const std::string&, const std::string&)> on_ipc_;
   std::function<void(CefRefPtr<CefBrowser>)> on_created_;
@@ -100,7 +103,7 @@ private:
 // Mock/stub implementation for lightweight build (ADREN_FEATURE_CEF == 0)
 class AdrenalineClient {
 public:
-  AdrenalineClient() : is_closing_(false), is_ready_(false), is_loaded_(false) {}
+  AdrenalineClient() : is_closing_(false), is_ready_(false), is_loaded_(false), idle_gc_done_(true) {}
   ~AdrenalineClient() = default;
 
   bool IsClosing() const { return is_closing_; }
@@ -112,6 +115,7 @@ private:
   bool is_closing_{false};
   bool is_ready_{false};
   bool is_loaded_{false};
+  bool idle_gc_done_{true};
   std::string current_title_{""};
 };
 

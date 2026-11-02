@@ -22,6 +22,7 @@ AdrenalineClient::AdrenalineClient(
     : is_closing_(false),
       is_ready_(false),
       is_loaded_(false),
+      idle_gc_done_(false),
       current_title_(""),
       on_ipc_(std::move(on_ipc)),
       on_created_(std::move(on_created)),
@@ -132,6 +133,21 @@ void AdrenalineClient::OnLoadEnd(CefRefPtr<CefBrowser> browser,
   // Emit page loaded status
   if (frame->IsMain()) {
     is_loaded_ = true;
+
+    // First paint is done: hand the renderer a chance to release its V8 heap and
+    // caches while the app is idle, which lowers baseline PSS. `window.gc()` is
+    // only defined because the app enables --js-flags=--expose-gc; the guard
+    // keeps this a no-op if that flag is ever dropped. Runs once per browser.
+    if (!idle_gc_done_ && browser.get()) {
+      idle_gc_done_ = true;
+      if (CefRefPtr<CefFrame> main = browser->GetMainFrame()) {
+        main->ExecuteJavaScript(
+            "try { if (window.gc) { window.gc(); } "
+            "if (window.performance && performance.clearResourceTimings) { "
+            "performance.clearResourceTimings(); } } catch (e) {}",
+            main->GetURL(), 0);
+      }
+    }
   }
 }
 
