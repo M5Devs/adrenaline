@@ -64,6 +64,22 @@ function selectEngine(engine, cefAvailable) {
   return { selected: engine, fellBack: false };
 }
 
+/**
+ * The webview engine compiles against Microsoft's WebView2 SDK header on
+ * Windows. It is fetched (not vendored) because the SDK is not redistributable,
+ * so make sure it is present before node-gyp runs. A no-op on other platforms.
+ */
+function ensureWebView2Sdk(engine) {
+  if (engine !== 'webview' || process.platform !== 'win32') return;
+  const header = path.join(ROOT, 'src', 'vendor', 'WebView2.h');
+  if (fs.existsSync(header)) return;
+  process.stdout.write('[build] fetching WebView2 SDK header...\n');
+  const res = spawnSync(process.execPath, [path.join(__dirname, 'fetch-webview2.js')], { stdio: 'inherit' });
+  if (res.status !== 0) {
+    process.stderr.write('[build] warning: could not fetch WebView2.h; the webview engine build will fail.\n');
+  }
+}
+
 function main() {
   const { engine, source } = resolveEngine();
   const { selected, fellBack } = selectEngine(engine, fs.existsSync(CEF_LIB));
@@ -78,6 +94,8 @@ function main() {
   }
 
   process.env.ADREN_ENGINE = selected;
+
+  ensureWebView2Sdk(selected);
 
   const passthrough = [];
   for (let i = 0; i < argv.length; i++) {

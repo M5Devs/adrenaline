@@ -1,0 +1,72 @@
+name: Cross-Platform Benchmark Matrix
+
+# On-demand only: this runs a full multi-runtime stress benchmark (each runtime
+# is CPU-saturated for `duration` seconds), so it must never fire on push/PR or
+# it would burn runner minutes on every commit.
+on:
+  workflow_dispatch:
+    inputs:
+      duration:
+        description: 'Stress duration in seconds per runtime'
+        required: false
+        default: '15'
+
+permissions:
+  contents: read
+
+jobs:
+  benchmark:
+    name: Royal Rumble (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      # One platform failing must not cancel the other; each uploads its own report.
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # `npm install` runs the package's `install` script, which builds the
+      # Adrenaline native addon (MSVC on Windows, clang + Cocoa/WebKit on macOS).
+      # On Windows that fetches the WebView2 SDK header first.
+      - name: Install dependencies and build the native addon
+        run: npm install --no-audit --no-fund
+
+      # Fetches the Neutralinojs runtime and stashes one Adrenaline addon per
+      # engine. (CEF is Linux-only, so it is skipped here.)
+      - name: Provision benchmark runtimes
+        run: node benchmarks/stress-suite/setup.js
+
+      # Windows and macOS GitHub runners provide a native graphical session, so
+      # there is no xvfb-run step here (that is a Linux-only concern).
+      - name: Run the benchmark
+        shell: bash
+        env:
+          STRESS_DURATION_MS: ${{ inputs.duration }}000
+          RUMBLE_REPORT: ${{ runner.os == 'Windows' && 'ROYAL_RUMBLE_WINDOWS.md' || 'ROYAL_RUMBLE_MACOS.md' }}
+        run: |
+          echo "Duration: ${STRESS_DURATION_MS} ms per runtime; report: ${RUMBLE_REPORT}"
+          node benchmarks/stress-suite/run.js
+          node benchmarks/stress-suite/report.js
+
+      - name: Show generated report
+        shell: bash
+        run: cat benchmarks/ROYAL_RUMBLE_*.md
+
+      - name: Upload benchmark report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: royal-rumble-${{ runner.os }}
+          if-no-files-found: warn
+          path: |
+            benchmarks/ROYAL_RUMBLE_*.md
+            benchmarks/stress-suite/profiles-combined.json
