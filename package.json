@@ -1,8 +1,11 @@
 {
   "name": "adrenaline-js",
   "version": "0.5.0",
-  "description": "Desktop app framework using Node.js and webview.h",
+  "description": "Lightweight, modular desktop application framework for Node.js using native WebViews and pruned CEF",
   "main": "index.js",
+  "engines": {
+    "node": ">=18.0.0"
+  },
   "types": "./index.d.ts",
   "exports": {
     ".": {
