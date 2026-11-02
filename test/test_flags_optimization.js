@@ -26,12 +26,30 @@ const requiredSwitches = [
   'disable-background-networking',
   'webrtc-ip-handling-policy',
   'disable_non_proxied_udp',
-  'hide-crashed-bubble'
+  'hide-crashed-bubble',
+  // Latency + idle-memory tuning added for the sub-2ms IPC target.
+  'disable-ipc-flooding-protection',
+  'aggressive-cache-discard'
 ];
 
 requiredSwitches.forEach((sw) => {
   assert.ok(cppContent.includes(sw), `adrenaline_app.cpp must contain switch/value '${sw}'`);
 });
+
+// The low-latency pump relies on CEF's schedule hook being implemented and
+// wired to the engine wake channel.
+assert.ok(
+  headerContent.includes('OnScheduleMessagePumpWork'),
+  'adrenaline_app.h must override OnScheduleMessagePumpWork for instant pump wakeups'
+);
+assert.ok(
+  cppContent.includes('OnScheduleMessagePumpWork'),
+  'adrenaline_app.cpp must implement OnScheduleMessagePumpWork'
+);
+assert.ok(
+  cppContent.includes('SignalEngineWakeup'),
+  'adrenaline_app.cpp must signal the engine wake fd from the pump schedule hook'
+);
 
 // Feature-elimination gates must be present.
 ['ADREN_FEATURE_WEBRTC', 'ADREN_FEATURE_CLEAN_PRIVACY', 'ADREN_FEATURE_PDF'].forEach((macro) => {

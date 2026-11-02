@@ -18,3 +18,6 @@ tools/reaper
 
 # profiles-combined.json is intentionally committed: it is the raw evidence
 # behind benchmarks/ROYAL_RUMBLE_SHOWDOWN.md.
+
+# Transient Neutralinojs download (removed by setup.js after extraction).
+neutralinojs.zip

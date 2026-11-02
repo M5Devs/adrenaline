@@ -228,14 +228,14 @@ function pruneBuildIntermediates(cefRoot) {
 }
 
 /**
- * Strip debug symbols from the shipped CEF shared libraries.
+ * Strip debug/unneeded symbols from the shipped CEF shared libraries.
  *
  * The official linux64 CEF binaries are built with full DWARF debug info:
- * libcef.so alone carries ~1 GB of `.debug_*` / `.symtab` sections that no
- * end-user application ever reads. Stripping them (keeping the dynamic symbol
- * table, which the dynamic linker needs) shrinks the shipped payload by more
- * than half without changing runtime behaviour. Idempotent: already-stripped
- * files report 0 bytes reclaimed.
+ * libcef.so alone carries hundreds of megabytes of `.debug_*` / `.symtab`
+ * sections that no end-user application ever reads. `strip --strip-unneeded`
+ * removes them while keeping `.dynsym`, which the dynamic linker needs, so the
+ * shipped payload shrinks by more than half without changing runtime behaviour.
+ * Idempotent: already-stripped files report 0 bytes reclaimed.
  */
 function stripDebugSymbols(cefRoot) {
   const releaseDir = path.join(cefRoot, 'Release');
@@ -245,16 +245,27 @@ function stripDebugSymbols(cefRoot) {
   for (const name of libs) {
     const file = path.join(releaseDir, name);
     if (!fs.existsSync(file)) continue;
-    const before = fs.statSync(file).size;
-    const res = spawnSync('strip', ['--strip-debug', file], { stdio: 'ignore' });
-    if (res.error || res.status !== 0) continue;
-    const after = fs.statSync(file).size;
-    if (after < before) {
+    const { stripped: didStrip, savedBytes: delta } = configResolver.stripBinary(file);
+    if (didStrip) {
       stripped.push(name);
-      savedBytes += before - after;
+      savedBytes += delta;
     }
   }
   return { stripped, savedBytes };
+}
+
+/**
+ * Strip debug symbols from the built native addon (`build/Release/adrenaline.node`).
+ * The addon is small compared to libcef.so, but it is part of the shipped
+ * payload and there is no reason to ship its symbol table either. No-op when the
+ * addon has not been built yet.
+ */
+function stripNativeAddon() {
+  const addon = path.join(ROOT, 'build', 'Release', 'adrenaline.node');
+  if (!fs.existsSync(addon)) {
+    return { stripped: false, savedBytes: 0 };
+  }
+  return configResolver.stripNativeAddon(addon);
 }
 
 function writeManifest(cefRoot, manifest) {
@@ -348,6 +359,14 @@ async function main() {
       log('Debug symbol stripping: nothing to strip (already stripped).');
     }
     strip.debugSymbols = debugStrip;
+
+    const addonStrip = stripNativeAddon();
+    if (addonStrip.stripped) {
+      log(`Debug symbols stripped from build/Release/adrenaline.node (${mb(addonStrip.savedBytes)} MB)`);
+    } else {
+      log('Native addon stripping: no addon present (build it first) or already stripped.');
+    }
+    strip.nativeAddon = addonStrip;
   } else {
     log('--skip-strip: leaving distribution assets untouched.');
   }
@@ -374,6 +393,8 @@ async function main() {
       testsRemoved: tests.removed,
       strippedAssets: strip.removed,
       debugSymbolsStripped: strip.debugSymbols ? strip.debugSymbols.stripped : [],
+      debugSymbolsBytes: strip.debugSymbols ? strip.debugSymbols.savedBytes : 0,
+      nativeAddonStripped: strip.nativeAddon ? strip.nativeAddon.stripped : false,
       modules: resolved.modules,
       generatedAt: new Date().toISOString()
     });
@@ -387,6 +408,7 @@ module.exports = {
   pruneLocales,
   removeTests,
   stripDebugSymbols,
+  stripNativeAddon,
   LOCALE_KEEP,
   INDEX_URL,
   CDN_BASE

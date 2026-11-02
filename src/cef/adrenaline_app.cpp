@@ -4,6 +4,7 @@
 
 #include <string>
 
+#include "adrenaline_wakeup.h"
 #include "include/cef_browser.h"
 #include "include/cef_command_line.h"
 #include "include/cef_frame.h"
@@ -132,13 +133,35 @@ void AdrenalineApp::OnBeforeCommandLineProcessing(
   command_line->AppendSwitch("disable-gpu");
   command_line->AppendSwitch("disable-dev-shm-usage");
 
+  // Chromium's IPC flooding protection throttles a fast sender (the benchmark
+  // storm sends ~100 packets/s) by queueing excess messages for a later tick,
+  // which shows up as p95/p99 round-trip latency. Disable it so replies are
+  // dispatched on the pump that receives them.
+  command_line->AppendSwitch("disable-ipc-flooding-protection");
+
+  // Baseline memory / latency tuning. These are always on: they shrink the
+  // idle working set (low-end device mode trims cache sizes, aggressive cache
+  // discard drops unused resources, no background networking removes idle
+  // wakeups) and never change rendering fidelity.
+  command_line->AppendSwitch("enable-low-end-device-mode");
+  command_line->AppendSwitch("disable-background-networking");
+  command_line->AppendSwitch("aggressive-cache-discard");
+  // Keep the renderer on the fast path even when the window is unfocused or
+  // considered occluded (headless/Xvfb, background tabs): Chromium otherwise
+  // throttles its timers and lowers its thread priority, which inflates the
+  // tail of the IPC round trip.
+  command_line->AppendSwitch("disable-renderer-backgrounding");
+  command_line->AppendSwitch("disable-background-timer-throttling");
+  command_line->AppendSwitch("disable-backgrounding-occluded-windows");
+  // Expose `window.gc()` in the renderer so the idle path can release V8 heap
+  // and caches once the first frame has painted (see AdrenalineClient).
+  command_line->AppendSwitchWithValue("js-flags", "--expose-gc");
+
   // Modular Feature Elimination Engine: switches are compiled in only when the
   // corresponding module is requested in adrenaline.config.js.
 #if ADREN_FEATURE_CLEAN_PRIVACY
   // Ungoogled / performance optimizations.
-  command_line->AppendSwitch("enable-low-end-device-mode");
   command_line->AppendSwitch("no-pings");
-  command_line->AppendSwitch("disable-background-networking");
   command_line->AppendSwitch("hide-crashed-bubble");
 #endif
 
@@ -157,6 +180,17 @@ void AdrenalineApp::OnContextInitialized() {
   // Browser creation is driven by `Adrenaline::CreateWindow` on the engine
   // thread; there is no implicit startup browser. This hook only exists so the
   // app satisfies CefBrowserProcessHandler.
+}
+
+void AdrenalineApp::OnScheduleMessagePumpWork(int64_t delay_ms) {
+  // Called from any thread (often the renderer/IPC thread) when CEF wants the
+  // embedder's external pump to run. Waking the engine thread here collapses
+  // the dispatch delay that a fixed sleep between CefDoMessageLoopWork() calls
+  // used to impose on every IPC round trip. `delay_ms` is ignored on purpose:
+  // the pump is serviced as soon as the loop is idle, which is what keeps p95
+  // latency low, and CEF's own batching prevents this from busy-spinning.
+  (void)delay_ms;
+  adrenaline::SignalEngineWakeup();
 }
 
 void AdrenalineApp::OnContextCreated(CefRefPtr<CefBrowser> browser,

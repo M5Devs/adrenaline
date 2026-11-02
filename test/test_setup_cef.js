@@ -68,6 +68,27 @@ assert.strictEqual(removedTests.removed, true, 'tests directory should be report
 assert.strictEqual(fs.existsSync(testsDir), false, 'tests directory should be gone');
 assert.ok(removedTests.savedBytes >= 500, 'saved bytes should cover the test payload');
 
+// 4. Debug-symbol stripping runs `strip --strip-unneeded` on the CEF shared libs.
+//    Verified on a real (debug) ELF so the assertion is not just "did it run".
+const { spawnSync } = require('child_process');
+const releaseDir = path.join(tmp, 'Release');
+fs.mkdirSync(releaseDir, { recursive: true });
+const probeC = path.join(tmp, 'probe.c');
+fs.writeFileSync(probeC, 'int cef_probe(int x) { return x + 1; }\n');
+const probeSo = path.join(releaseDir, 'libcef.so');
+const cc = spawnSync('cc', ['-g', '-shared', '-fPIC', '-o', probeSo, probeC], { stdio: 'ignore' });
+if (!cc.error && cc.status === 0) {
+  const beforeSize = fs.statSync(probeSo).size;
+  const stripResult = setupCef.stripDebugSymbols(tmp);
+  assert.ok(stripResult.stripped.includes('libcef.so'), 'libcef.so should be reported stripped');
+  assert.ok(fs.statSync(probeSo).size < beforeSize, 'stripped libcef.so should be smaller');
+  assert.strictEqual(stripResult.savedBytes, beforeSize - fs.statSync(probeSo).size, 'savedBytes must match the delta');
+  // Missing files are tolerated (the real distribution may lack swiftshader).
+  assert.ok(Array.isArray(stripResult.stripped), 'stripped should always be an array');
+} else {
+  console.log('  (skipping debug-symbol strip assertions: no C compiler available)');
+}
+
 fs.rmSync(tmp, { recursive: true, force: true });
 
 console.log('test_setup_cef.js passed successfully!');
