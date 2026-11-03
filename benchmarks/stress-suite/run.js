@@ -1,24 +1,28 @@
 'use strict';
 
 /*
- * Royal Rumble orchestrator.
+ * Royal Rumble orchestrator (cross-platform).
  *
- * Runs the profiler against each of the five runtimes *sequentially* (never
- * concurrently, so no two ever compete for CPU), collects the disk footprint
- * for each, and writes the aggregated evidence to profiles-<runtime>.json.
- * report.js then turns that evidence into
- * benchmarks/ROYAL_RUMBLE_SHOWDOWN.md.
+ * Runs the profiler against each available runtime *sequentially* (never
+ * concurrently, so no two ever compete for CPU), collects the disk footprint for
+ * each, and writes the aggregated evidence to profiles-combined.json. report.js
+ * then turns that evidence into a markdown report.
  *
  * Usage:
- *   node run.js                     # all five runtimes, 30s each
+ *   node run.js                     # all runtimes available on this platform
  *   node run.js electron nw         # a subset, in the given order
  *   STRESS_DURATION_MS=8000 node run.js   # shorter smoke run
+ *
+ * A single runtime failing (e.g. its binary is missing) does not abort the whole
+ * matrix: the failure is recorded and the remaining runtimes still run. The
+ * process exits non-zero only if *every* requested runtime failed, or if too few
+ * succeeded for report.js to build a comparison (it needs at least two).
  */
 
 const fs = require('fs');
 const path = require('path');
 const { profileRun, measureFootprint } = require('./profiler');
-const { ORDER, commandFor, footprintRuntimeFor, RUNTIMES } = require('./runtimes');
+const { runtimeOrder, commandFor, footprintRuntimeFor, RUNTIMES } = require('./runtimes');
 
 const SUITE_DIR = __dirname;
 const REPO_ROOT = path.resolve(__dirname, '..', '..');
@@ -72,7 +76,7 @@ async function main() {
   const durationMs = Number(process.env.STRESS_DURATION_MS || 30000);
   const intervalMs = Number(process.env.STRESS_INTERVAL_MS || 500);
   const requested = process.argv.slice(2);
-  const runtimes = requested.length ? requested : ORDER;
+  const runtimes = requested.length ? requested : runtimeOrder();
 
   for (const rt of runtimes) {
     if (!RUNTIMES[rt]) {
@@ -82,16 +86,22 @@ async function main() {
   }
 
   const combinedPath = path.join(SUITE_DIR, 'profiles-combined.json');
+  // A fresh run owns the evidence file: start from empty so a previous platform's
+  // run (e.g. the committed Linux evidence, or Linux-only CEF) never leaks into
+  // this platform's report. Set RUMBLE_MERGE=1 to accumulate instead (useful when
+  // profiling runtimes one at a time locally).
   let combined = {};
-  if (fs.existsSync(combinedPath)) {
+  if (process.env.RUMBLE_MERGE === '1' && fs.existsSync(combinedPath)) {
     try { combined = JSON.parse(fs.readFileSync(combinedPath, 'utf8')); } catch (e) { combined = {}; }
   }
 
   let failed = 0;
+  let succeeded = 0;
   for (const rt of runtimes) {
     try {
       const evidence = await runOne(rt, durationMs, intervalMs);
       combined[rt] = evidence;
+      succeeded++;
       fs.writeFileSync(combinedPath, JSON.stringify(combined, null, 2));
     } catch (e) {
       failed++;
@@ -99,8 +109,9 @@ async function main() {
     }
   }
 
-  console.error('\nEvidence written to ' + combinedPath);
-  if (failed) process.exit(1);
+  console.error(`\nEvidence written to ${combinedPath} (${succeeded} ok, ${failed} failed)`);
+  // report.js needs at least two runtimes; anything less is a hard failure.
+  if (succeeded < 2) process.exit(1);
 }
 
 main().catch((e) => { console.error(e); process.exit(1); });

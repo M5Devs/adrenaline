@@ -71,6 +71,8 @@ Lower is better for every metric. **Bold** marks the winner of each row.
 
 *Full methodology, raw 350KB profiler trace, and process-by-process breakdowns available in `benchmarks/ROYAL_RUMBLE_SHOWDOWN.md`.*
 
+The numbers above are the canonical **Linux** run. The same harness runs on **Windows** (WebView2) and **macOS** (Cocoa/WebKit) via the on-demand **Cross-Platform Benchmark Matrix** workflow (`.github/workflows/benchmark-matrix.yml`). Trigger it from the Actions tab (`workflow_dispatch`, with an optional stress duration); each platform uploads its own `ROYAL_RUMBLE_WINDOWS.md` / `ROYAL_RUMBLE_MACOS.md` report and raw `profiles-combined.json` trace as a build artifact. The workflow never runs on push or pull request, so it adds no automatic CI cost. The profiler measures PSS on Linux and the closest resident/working-set figure on Windows/macOS, so cross-platform memory totals are indicative, not directly comparable.
+
 ### Engine Roles — Choose Your Trade-off
 
 - **WebView Mode (The Lightweight King):** Ultra-small shipped footprint — **~121 MB total** including the Node.js runtime, of which the native addon itself is only **~0.3 MB**. Ideal for lightweight desktop utilities that can lean on the OS WebView.

@@ -1,26 +1,41 @@
 'use strict';
 
 /*
- * Task-manager style profiler.
+ * Task-manager style profiler (cross-platform: Linux, Windows, macOS).
  *
- * Spawns a runtime runner under `xvfb-run -a` and samples the *entire* process
- * tree every `intervalMs` for 30 seconds of sustained stress. The two headline
- * memory numbers are taken from /proc/[pid]/smaps_rollup so that shared pages
- * are counted once across the tree:
+ * Spawns a runtime runner and samples the *entire* process tree every
+ * `intervalMs` for `durationMs` of sustained stress.
  *
- *   PSS = sum of each process' Pss.  A page shared by N processes contributes
- *         1/N to each, so summing Pss over the tree counts it exactly once.
- *   Private = sum of Private_Clean + Private_Dirty.  This is the portion that
- *         cannot be shared with any other process at all (the "unique" cost).
+ * Memory is measured with the most accurate primitive each OS offers, but every
+ * backend is normalised to the same four numbers so the report reads identically
+ * everywhere:
  *
- * Naive RSS is intentionally *not* used for the headline: summing Rss across a
- * Chromium/WebKit tree double-counts every shared framework .so, inflating the
- * baseline by hundreds of megabytes.
+ *   pssKb     - "shared-aware" total. On Linux this is the true PSS from
+ *               /proc/[pid]/smaps_rollup: a page shared by N processes
+ *               contributes 1/N to each, so summing it over the tree counts the
+ *               page exactly once. Windows and macOS do not expose PSS, so the
+ *               closest honest analogue is used (Working Set / resident size)
+ *               and the report states this explicitly. On those platforms the
+ *               number *over*-counts shared framework pages, never under-counts.
+ *   privateKb - the portion no other process can share. Linux: Private_Clean +
+ *               Private_Dirty. Windows: PrivatePageCount. macOS: rss minus
+ *               the shared pages reported by `vmmap -summary` (best effort).
+ *   rssKb     - resident set size as the OS reports it.
+ *   sharedKb  - pss - private, i.e. the shared portion of the shared-aware total.
+ *
+ * The headline memory metric is the *shared-aware* number (PSS on Linux). Naive
+ * RSS is intentionally not used for the Linux headline: summing Rss across a
+ * Chromium/WebKit tree double-counts every shared framework library.
  */
 
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const { spawn, spawnSync } = require('child_process');
+
+const IS_WIN = process.platform === 'win32';
+const IS_MAC = process.platform === 'darwin';
+const IS_LINUX = process.platform === 'linux';
 
 const CLK_TCK = 100; // getconf CLK_TCK on Linux
 
@@ -32,19 +47,23 @@ function readFileSafe(p) {
   try { return fs.readFileSync(p, 'utf8'); } catch (e) { return null; }
 }
 
-// ---- process tree ---------------------------------------------------------
+/** Run a command and return trimmed stdout, or null if it failed. */
+function capture(cmd, args, opts = {}) {
+  try {
+    const r = spawnSync(cmd, args, { encoding: 'utf8', windowsHide: true, maxBuffer: 64 * 1024 * 1024, ...opts });
+    if (r.error || r.status !== 0 || r.stdout == null) return null;
+    return r.stdout;
+  } catch (e) {
+    return null;
+  }
+}
 
-/**
- * Snapshot every process in one pass.
- *
- * We deliberately do NOT use /proc/[pid]/task/[pid]/children to walk the tree:
- * that file is *per-thread*, so a child forked from a non-main thread (which is
- * exactly how WebKitGTK spawns WebKitNetworkProcess / WebKitWebProcess) never
- * appears under task/<pid>/children even though its PPID is the runner. A
- * single full /proc scan keyed on the stat PPID field is both correct and, at
- * this tree size, cheaper than re-reading stat twice per pid.
- */
-function scanProc() {
+// ===========================================================================
+// Process tree
+// ===========================================================================
+
+/** Linux: one pass over /proc, keyed on the stat PPID field. */
+function scanProcLinux() {
   const map = new Map();
   let entries = [];
   try { entries = fs.readdirSync('/proc'); } catch (e) { return map; }
@@ -71,6 +90,95 @@ function scanProc() {
   return map;
 }
 
+/**
+ * Windows: one `Get-CimInstance Win32_Process` call returns the whole table
+ * (pid, parent, command line, private + working set). Much cheaper than a
+ * per-pid round trip and it gives us the tree and the memory in one shot.
+ *
+ * CIM reports ParentProcessId, so the tree is reconstructed by following
+ * parents up to the root instead of walking children down.
+ */
+function scanProcWindows() {
+  const map = new Map();
+  const ps = [
+    '$ErrorActionPreference = "Stop";',
+    'Get-CimInstance Win32_Process |',
+    'Select-Object ProcessId,ParentProcessId,Name,WorkingSetSize,PrivatePageCount,UserModeTime,KernelModeTime |',
+    'ConvertTo-Json -Compress -Depth 3',
+  ].join(' ');
+  const out = capture('powershell', ['-NoProfile', '-NonInteractive', '-Command', ps]);
+  if (!out) return map;
+  let rows;
+  try { rows = JSON.parse(out); } catch (e) { return map; }
+  if (!Array.isArray(rows)) rows = rows ? [rows] : [];
+  for (const r of rows) {
+    const pid = Number(r.ProcessId);
+    if (!Number.isFinite(pid)) continue;
+    map.set(pid, {
+      pid,
+      comm: r.Name || 'unknown',
+      state: 'R',
+      ppid: Number(r.ParentProcessId) || 0,
+      pgrp: null,
+      // UserModeTime/KernelModeTime are 100-ns ticks (== 10^7 per second).
+      cpuTicks: (Number(r.UserModeTime) || 0) + (Number(r.KernelModeTime) || 0),
+      workingSet: Number(r.WorkingSetSize) || 0,
+      privateBytes: Number(r.PrivatePageCount) || 0,
+    });
+  }
+  return map;
+}
+
+/**
+ * macOS: `ps -Ao pid=,ppid=,pgid=,rss=,time=,comm=` for the whole table.
+ * `pgid` is captured so the termination path can key on the process group
+ * exactly as it does on Linux.
+ */
+function scanProcMac() {
+  const map = new Map();
+  const out = capture('ps', ['-Ao', 'pid=,ppid=,pgid=,rss=,time=,comm=']);
+  if (!out) return map;
+  for (const line of out.split('\n')) {
+    const t = line.trim();
+    if (!t) continue;
+    const m = /^(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\S+)\s+(.*)$/.exec(t);
+    if (!m) continue;
+    const pid = Number(m[1]);
+    map.set(pid, {
+      pid,
+      comm: path.basename(m[6].trim()) || 'unknown',
+      state: 'R',
+      ppid: Number(m[2]),
+      pgrp: Number(m[3]),
+      // `time` is [dd-]hh:mm:ss of cumulative CPU; convert to 100-tick units so
+      // it is directly comparable to Linux's utime+stime.
+      cpuTicks: parsePsTime(m[5]) * CLK_TCK,
+      rssKb: Number(m[4]),
+    });
+  }
+  return map;
+}
+
+function parsePsTime(s) {
+  // Formats: "MM:SS.ss", "HH:MM:SS", "DD-HH:MM:SS".
+  let days = 0;
+  let rest = s;
+  const dash = s.indexOf('-');
+  if (dash >= 0) { days = Number(s.slice(0, dash)) || 0; rest = s.slice(dash + 1); }
+  const parts = rest.split(':').map((p) => Number(p) || 0);
+  let h = 0, m = 0, sec = 0;
+  if (parts.length === 3) { [h, m, sec] = parts; }
+  else if (parts.length === 2) { [m, sec] = parts; }
+  else { sec = parts[0] || 0; }
+  return days * 86400 + h * 3600 + m * 60 + sec;
+}
+
+function scanProc() {
+  if (IS_WIN) return scanProcWindows();
+  if (IS_MAC) return scanProcMac();
+  return scanProcLinux();
+}
+
 /** Descendants of `rootPid` (inclusive) from a scanProc() snapshot. */
 function collectTreeFrom(map, rootPid) {
   const childrenOf = new Map();
@@ -94,7 +202,9 @@ function collectTree(rootPid) {
   return collectTreeFrom(scanProc(), rootPid);
 }
 
-// ---- per-process metrics --------------------------------------------------
+// ===========================================================================
+// Per-process memory
+// ===========================================================================
 
 function smapsRollup(pid) {
   const txt = readFileSafe(`/proc/${pid}/smaps_rollup`);
@@ -137,6 +247,83 @@ function smapsFallback(pid) {
   return acc;
 }
 
+/**
+ * macOS per-process shared-page accounting.
+ *
+ * `vmmap -summary <pid>` is the only user-space way to split a process' memory
+ * into its private and shared parts (Mach task info via `task_info` would need a
+ * native helper). We only need the *shared* figure, and vmmap prints it in a
+ * line such as "  Shared: 12.3M".
+ *
+ * vmmap is expensive (it walks the whole address space) and is run with
+ * spawnSync, so calling it for every process on every sample would stall the
+ * sampler. It is therefore cached per pid for a few seconds, and disabled for
+ * the rest of the run after repeated failures or a single very slow call. When
+ * it is unavailable the whole resident size is treated as private (an over-count
+ * of private, never a crash), which is the honest fallback.
+ */
+const MAC_SHARED_TTL_MS = 4000;
+const MAC_SHARED_MAX_MS = 2500;
+const _macSharedCache = new Map();
+let _macSharedDisabled = false;
+
+function macSharedKb(pid) {
+  if (_macSharedDisabled) return null;
+  const now = Date.now();
+  const hit = _macSharedCache.get(pid);
+  if (hit && now - hit.at < MAC_SHARED_TTL_MS) return hit.kb;
+  const t0 = Date.now();
+  const out = capture('/usr/bin/vmmap', ['-summary', String(pid)]);
+  const elapsed = Date.now() - t0;
+  if (elapsed > MAC_SHARED_MAX_MS) {
+    _macSharedDisabled = true;
+    return null;
+  }
+  if (!out) return null;
+  const m = /Shared:\s+([0-9.]+)([KMG]?)/.exec(out);
+  if (!m) return null;
+  const n = Number(m[1]);
+  const unit = m[2];
+  if (!Number.isFinite(n)) return null;
+  let kb;
+  if (unit === 'G') kb = n * 1024 * 1024;
+  else if (unit === 'M') kb = n * 1024;
+  else if (unit === 'K') kb = n;
+  else kb = n / 1024; // vmmap prints bytes when no suffix
+  _macSharedCache.set(pid, { at: now, kb });
+  return kb;
+}
+
+/**
+ * Normalise one process' memory into {rssKb, pssKb, privateKb, sharedKb, swapKb}
+ * using the platform's best primitive. `snapshot` is the process-table entry,
+ * which already carries the Windows figures.
+ */
+function processMemory(st, snapshot) {
+  if (IS_LINUX) {
+    const mem = smapsRollup(st.pid);
+    if (!mem) return null;
+    return {
+      rssKb: mem.rss,
+      pssKb: mem.pss,
+      privateKb: mem.privateClean + mem.privateDirty,
+      sharedKb: mem.sharedClean + mem.sharedDirty,
+      swapKb: mem.swapPss,
+    };
+  }
+  if (IS_WIN) {
+    const rssKb = Math.round((st.workingSet || 0) / 1024);
+    const privateKb = Math.round((st.privateBytes || 0) / 1024);
+    // No PSS on Windows; Working Set is the shared-aware figure.
+    return { rssKb, pssKb: rssKb, privateKb, sharedKb: Math.max(0, rssKb - privateKb), swapKb: 0 };
+  }
+  // macOS
+  const rssKb = st.rssKb || 0;
+  const shared = macSharedKb(st.pid);
+  const sharedKb = shared === null ? 0 : Math.min(shared, rssKb);
+  return { rssKb, pssKb: rssKb, privateKb: Math.max(0, rssKb - sharedKb), sharedKb, swapKb: 0 };
+}
+
 function sampleTree(rootPid) {
   const snapshot = scanProc();
   const pids = collectTreeFrom(snapshot, rootPid);
@@ -145,37 +332,72 @@ function sampleTree(rootPid) {
   for (const pid of pids) {
     const st = snapshot.get(pid);
     if (!st || st.state === 'Z') continue; // zombies hold no memory
-    const mem = smapsRollup(pid);
+    const mem = processMemory(st, snapshot);
     if (!mem) continue;
-    pss += mem.pss;
-    priv += mem.privateClean + mem.privateDirty;
-    rss += mem.rss;
-    shared += mem.sharedClean + mem.sharedDirty;
+    pss += mem.pssKb;
+    priv += mem.privateKb;
+    rss += mem.rssKb;
+    shared += mem.sharedKb;
+    // Cumulative CPU in CLK_TCK (100 Hz) units, so the delta math below is the
+    // same on every platform. Linux: utime+stime are already in ticks. Windows:
+    // UserModeTime+KernelModeTime are 100-ns units (10^7 per second), so divide
+    // by 1e5 to reach 100-per-second ticks. macOS: scanProcMac already converted
+    // `ps time` seconds to ticks.
+    const cpuTicks = IS_LINUX ? ((st.utime || 0) + (st.stime || 0))
+      : IS_WIN ? (st.cpuTicks || 0) / 1e5
+      : (st.cpuTicks || 0);
     procs.push({
       pid,
       comm: st.comm,
-      pssKb: mem.pss,
-      privateKb: mem.privateClean + mem.privateDirty,
-      rssKb: mem.rss,
-      sharedKb: mem.sharedClean + mem.sharedDirty,
-      swapPssKb: mem.swapPss,
-      cpuTicks: st.utime + st.stime,
+      pssKb: mem.pssKb,
+      privateKb: mem.privateKb,
+      rssKb: mem.rssKb,
+      sharedKb: mem.sharedKb,
+      swapPssKb: mem.swapKb,
+      cpuTicks,
     });
   }
   return { pids, procs, pssKb: pss, privateKb: priv, rssKb: rss, sharedKb: shared };
 }
 
-// ---- runtime disk footprint ----------------------------------------------
+// ===========================================================================
+// Runtime disk footprint
+// ===========================================================================
 
 function duBytes(dir) {
-  const r = spawnSync('du', ['-sk', dir], { encoding: 'utf8' });
-  if (r.status !== 0) return 0;
-  const kb = parseInt(r.stdout.trim().split(/\s+/)[0], 10);
-  return Number.isFinite(kb) ? kb * 1024 : 0;
+  if (!fs.existsSync(dir)) return 0;
+  const r = spawnSync('du', ['-sk', dir], { encoding: 'utf8', windowsHide: true });
+  if (r.status === 0 && r.stdout) {
+    const kb = parseInt(r.stdout.trim().split(/\s+/)[0], 10);
+    if (Number.isFinite(kb)) return kb * 1024;
+  }
+  return duBytesPortable(dir);
+}
+
+/** Recursive byte count used when `du` is unavailable (e.g. Windows). */
+function duBytesPortable(dir) {
+  let total = 0;
+  let entries;
+  try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch (e) { return 0; }
+  for (const e of entries) {
+    const p = path.join(dir, e.name);
+    try {
+      if (e.isDirectory()) total += duBytesPortable(p);
+      else if (e.isFile()) total += fs.statSync(p).size;
+    } catch (err) { /* racing deletion / permission: skip */ }
+  }
+  return total;
 }
 
 function fileBytes(p) {
   try { return fs.statSync(p).size; } catch (e) { return 0; }
+}
+
+/** Platform-specific name of the shipped Neutralinojs runtime binary. */
+function neutralinoBinaryName() {
+  if (IS_WIN) return 'neutralino-win_x64.exe';
+  if (IS_MAC) return os.arch() === 'arm64' ? 'neutralino-mac_arm64' : 'neutralino-mac_x64';
+  return 'neutralino-linux_x64';
 }
 
 /**
@@ -202,19 +424,20 @@ function measureFootprint(runtime, opts) {
     components.push({ label: 'runner code', bytes: runnerBytes(['electron-runner.js', 'profiler.js', 'run.js', 'report.js']) });
   } else if (runtime === 'nw') {
     const nwDist = nwDistributionDir(root);
-    components.push({ label: 'NW.js distribution (nw binary + libnw.so + Chromium + Node + ICU)', bytes: duBytes(nwDist) });
+    components.push({ label: 'NW.js distribution (nw binary + Chromium + Node + ICU)', bytes: duBytes(nwDist) });
     components.push({ label: 'application assets (app/)', bytes: duBytes(appDir) });
     components.push({ label: 'runner code (nw-app/)', bytes: duBytes(path.join(suite, 'nw-app')) });
   } else if (runtime === 'neutralino') {
-    components.push({ label: 'Neutralino binary (neutralino-linux_x64)', bytes: fileBytes(path.join(suite, 'neu-app', 'neutralino-linux_x64')) });
+    const neuBin = neutralinoBinaryName();
+    components.push({ label: 'Neutralino binary (' + neuBin + ')', bytes: fileBytes(path.join(suite, 'neu-app', neuBin)) });
     components.push({ label: 'Neutralino client library (neutralino.js)', bytes: fileBytes(path.join(suite, 'neu-app', 'resources', 'neutralino.js')) });
     components.push({ label: 'application assets (app/)', bytes: duBytes(appDir) });
     components.push({ label: 'runner code (neu-app/ extensions)', bytes: duBytes(path.join(suite, 'neu-app', 'extensions')) + fileBytes(path.join(suite, 'neu-app', 'resources', 'neu-inject.js')) });
     // Neutralino delegates both the renderer (system WebView) and the backend
     // (the user's own runtime) to the OS; the backend here is Node.js.
     components.push({ label: 'Node.js runtime binary for the extension backend (' + path.basename(process.execPath) + ')', bytes: fileBytes(process.execPath) });
-    const wk = sharedLibraryBytes(['libwebkit2gtk-4.1.so.0', 'libwebkit2gtk-4.0.so.0']);
-    if (wk) components.push({ label: 'system WebKitGTK shared library (NOT shipped)', bytes: wk, shared: true });
+    const wk = systemWebViewBytes();
+    if (wk) components.push({ label: systemWebViewLabel(), bytes: wk, shared: true });
   } else if (runtime === 'adrenaline-cef') {
     adrenalineCore();
     components.push({ label: 'adrenaline native addon (CEF engine)', bytes: fileBytes(path.join(root, '.bench-artifacts', 'adrenaline-cef.node')) });
@@ -229,10 +452,10 @@ function measureFootprint(runtime, opts) {
     adrenalineCore();
     components.push({ label: 'adrenaline native addon (WebView engine)', bytes: fileBytes(path.join(root, '.bench-artifacts', 'adrenaline-webview.node')) });
     components.push({ label: 'runner code', bytes: runnerBytes(['adrenaline-runner.js', 'profiler.js', 'run.js', 'report.js']) });
-    // The framework does not bundle WebKitGTK: it links the OS-provided shared
-    // library, which is measured separately and clearly labelled as shared.
-    const wk = sharedLibraryBytes(['libwebkit2gtk-4.1.so.0', 'libwebkit2gtk-4.0.so.0']);
-    if (wk) components.push({ label: 'system WebKitGTK shared library (NOT shipped)', bytes: wk, shared: true });
+    // The framework does not bundle the OS webview: it links the platform
+    // shared library/framework, measured separately and clearly labelled shared.
+    const wk = systemWebViewBytes();
+    if (wk) components.push({ label: systemWebViewLabel(), bytes: wk, shared: true });
   }
 
   const total = components.reduce((a, c) => a + c.bytes, 0);
@@ -249,11 +472,41 @@ function nwDistributionDir(root) {
   return base;
 }
 
-function sharedLibraryBytes(names) {
+function systemWebViewLabel() {
+  if (IS_WIN) return 'system WebView2 runtime (NOT shipped)';
+  if (IS_MAC) return 'system WebKit framework (NOT shipped)';
+  return 'system WebKitGTK shared library (NOT shipped)';
+}
+
+/** Size of the OS-provided webview that the runtime links instead of shipping. */
+function systemWebViewBytes() {
+  if (IS_WIN) {
+    // The Evergreen WebView2 runtime lives under a versioned folder in Program
+    // Files; report the largest msedgewebview2.exe we can find (the runtime's
+    // bulk) rather than the whole shared Edge tree.
+    const bases = [
+      path.join(process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)', 'Microsoft', 'EdgeWebView', 'Application'),
+      path.join(process.env['ProgramFiles'] || 'C:\\Program Files', 'Microsoft', 'EdgeWebView', 'Application'),
+    ];
+    let best = 0;
+    for (const b of bases) {
+      let vers = [];
+      try { vers = fs.readdirSync(b); } catch (e) { continue; }
+      for (const v of vers) {
+        const exe = path.join(b, v, 'msedgewebview2.exe');
+        best = Math.max(best, fileBytes(exe));
+      }
+    }
+    return best;
+  }
+  if (IS_MAC) {
+    // WebKit is a system framework; report the main framework binary.
+    return fileBytes('/System/Library/Frameworks/WebKit.framework/Versions/A/WebKit');
+  }
   const r = spawnSync('ldconfig', ['-p'], { encoding: 'utf8' });
   if (r.status !== 0) return 0;
   for (const line of r.stdout.split('\n')) {
-    for (const n of names) {
+    for (const n of ['libwebkit2gtk-4.1.so.0', 'libwebkit2gtk-4.0.so.0']) {
       if (line.includes(n)) {
         const m = /=>\s+(\S+)/.exec(line);
         if (m) return fileBytes(m[1]);
@@ -263,39 +516,39 @@ function sharedLibraryBytes(names) {
   return 0;
 }
 
-// ---- main profiling run ---------------------------------------------------
+// ===========================================================================
+// Process control
+// ===========================================================================
 
 /**
- * Kill the whole process group, not just the tree.
- *
- * We spawn the runner detached, so it becomes a process-group leader and every
- * descendant (xvfb-run, Xvfb, the Node backend, its SHA-256 workers, and the
- * WebKit/Chromium renderer processes) inherits that group id. Signalling the
- * group kills them all in one atomic step, which is what prevents grandchildren
- * from being orphaned and reparented to a PID 1 that may not reap them (leaving
- * zombies behind). A per-pid sweep follows as a belt-and-braces fallback.
+ * Members of the process group `pgid` on POSIX. Windows has no POSIX process
+ * groups, so callers there use the process tree instead (pass `rootPid`).
  */
-function killTree(rootPid, signal) {
-  try { process.kill(-rootPid, signal); } catch (e) { /* group already gone */ }
-  const pids = collectTree(rootPid);
-  for (const pid of pids.slice().reverse()) {
-    try { process.kill(pid, signal); } catch (e) { /* ignore */ }
-  }
-  try { process.kill(rootPid, signal); } catch (e) { /* ignore */ }
-}
-
-/** Every process whose process-group id is `pgid`. */
 function groupMembers(pgid) {
   const out = [];
+  if (IS_WIN) return out;
   for (const p of scanProc().values()) {
     if (p.pgrp === pgid) out.push({ pid: p.pid, state: p.state, comm: p.comm });
   }
   return out;
 }
 
-/** Count live (non-zombie) members of the group, plus any zombies. */
-function groupLeftovers(pgid) {
-  const members = groupMembers(pgid);
+/** Members of the process tree rooted at `rootPid` (Windows termination path). */
+function treeMembers(rootPid) {
+  const snapshot = scanProc();
+  return collectTreeFrom(snapshot, rootPid)
+    .map((pid) => snapshot.get(pid))
+    .filter(Boolean)
+    .map((p) => ({ pid: p.pid, state: p.state, comm: p.comm }));
+}
+
+/**
+ * Count live (non-zombie) members, plus any zombies. On POSIX this is the
+ * process group (the runner is detached, so it leads one); on Windows it is the
+ * process tree, since there is no group id to key on.
+ */
+function groupLeftovers(pgid, rootPid) {
+  const members = IS_WIN && rootPid ? treeMembers(rootPid) : groupMembers(pgid);
   return {
     total: members.length,
     live: members.filter((m) => m.state !== 'Z').length,
@@ -304,19 +557,45 @@ function groupLeftovers(pgid) {
   };
 }
 
+/**
+ * Kill a process and all of its descendants.
+ *
+ * Linux/macOS: signal the whole process group (the runner is spawned detached,
+ * so it leads a group and every descendant inherits it), then sweep the tree.
+ * Windows: `taskkill /T /F` walks the tree natively; fall back to a manual sweep.
+ */
+function killTree(rootPid, signal) {
+  if (IS_WIN) {
+    const force = !signal || signal === 'SIGKILL' || signal === 'SIGTERM';
+    spawnSync('taskkill', ['/PID', String(rootPid), '/T', force ? '/F' : ''].filter(Boolean), { windowsHide: true, stdio: 'ignore' });
+    for (const pid of collectTree(rootPid).slice().reverse()) {
+      try { process.kill(pid, signal || 'SIGKILL'); } catch (e) { /* ignore */ }
+    }
+    return;
+  }
+  try { process.kill(-rootPid, signal); } catch (e) { /* group already gone */ }
+  const pids = collectTree(rootPid);
+  for (const pid of pids.slice().reverse()) {
+    try { process.kill(pid, signal); } catch (e) { /* ignore */ }
+  }
+  try { process.kill(rootPid, signal); } catch (e) { /* ignore */ }
+}
+
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
 /**
- * Compile (once) and return the path to the subreaper wrapper. Returns null if
- * no C compiler is available, in which case we fall back to launching the
- * command directly (correctness of the measurements is unaffected; only zombie
+ * Compile (once) and return the path to the subreaper wrapper. Linux-only: the
+ * subreaper trick relies on prctl(PR_SET_CHILD_SUBREAPER). Returns null on
+ * Windows/macOS or when no C compiler is available, in which case the command is
+ * launched directly (correctness of the measurements is unaffected; only zombie
  * reaping of SIGKILLed orphans is).
  */
 let _reaperPath;
 function ensureReaper() {
   if (_reaperPath !== undefined) return _reaperPath;
+  if (!IS_LINUX) { _reaperPath = null; return _reaperPath; }
   const src = path.join(__dirname, 'tools', 'reaper.c');
   const bin = path.join(__dirname, 'tools', 'reaper');
   if (!fs.existsSync(src)) { _reaperPath = null; return _reaperPath; }
@@ -341,6 +620,10 @@ function readPhase(phaseFile) {
   try { return JSON.parse(txt); } catch (e) { return null; }
 }
 
+// ===========================================================================
+// Main profiling run
+// ===========================================================================
+
 async function profileRun(opts) {
   const {
     runtime,
@@ -363,8 +646,13 @@ async function profileRun(opts) {
     env = {},
   } = opts;
 
-  const xvfb = spawnSync('which', ['xvfb-run'], { encoding: 'utf8' });
-  const useXvfb = xvfb.status === 0;
+  // Headless X is a Linux concept only. Windows and macOS GitHub runners have a
+  // native graphical session, so xvfb-run must not be used there.
+  let useXvfb = false;
+  if (IS_LINUX) {
+    const xvfb = spawnSync('which', ['xvfb-run'], { encoding: 'utf8' });
+    useXvfb = xvfb.status === 0;
+  }
 
   // Everything runs under the subreaper wrapper so that SIGKILLed orphans are
   // re-parented to it (not to the container's non-reaping PID 1) and reaped.
@@ -382,7 +670,11 @@ async function profileRun(opts) {
     cwd: runCwd || repoRoot,
     env: { ...process.env, ...env },
     stdio: ['ignore', 'pipe', 'pipe'],
-    detached: true,
+    // A detached child leads a new process group on POSIX so the whole tree can
+    // be signalled at once. On Windows this would pop a console window, and the
+    // tree is killed with taskkill /T anyway, so it is left off there.
+    detached: !IS_WIN,
+    windowsHide: true,
   });
 
   const rootPid = child.pid;
@@ -474,27 +766,29 @@ async function profileRun(opts) {
   // reaps the remaining renderer/xvfb children.
   const termStart = Date.now();
   const pgid = rootPid; // detached => the wrapper is its own group leader
+  const members = () => (IS_WIN ? treeMembers(rootPid) : groupMembers(pgid));
+  const leftoversOf = () => groupLeftovers(pgid, rootPid);
   if (alive) killTree(rootPid, 'SIGTERM');
 
-  // Give the group a generous window to drain. The subreaper wrapper stays alive
+  // Give the tree a generous window to drain. The subreaper wrapper stays alive
   // reaping orphans, so `live` naturally reaches 0 without a SIGKILL in the
   // common case. Killing it early would re-parent orphans to PID 1.
   let escalated = false;
   for (let i = 0; i < 80; i++) {
-    if (groupLeftovers(pgid).live === 0) break;
+    if (leftoversOf().live === 0) break;
     await sleep(100);
   }
-  if (groupLeftovers(pgid).live > 0) {
+  if (leftoversOf().live > 0) {
     escalated = true;
     // SIGKILL everything *except* the subreaper first, let it reap, then kill it.
-    for (const m of groupMembers(pgid)) {
+    for (const m of members()) {
       if (m.pid === rootPid) continue;
       try { process.kill(m.pid, 'SIGKILL'); } catch (e) { /* ignore */ }
     }
     await sleep(500);
     try { process.kill(rootPid, 'SIGKILL'); } catch (e) { /* ignore */ }
     for (let i = 0; i < 30; i++) {
-      if (groupLeftovers(pgid).live === 0) break;
+      if (leftoversOf().live === 0) break;
       await sleep(100);
     }
   }
@@ -502,12 +796,12 @@ async function profileRun(opts) {
 
   // Phase 4: final sweep, then report exactly what (if anything) survived.
   await sleep(300);
-  const leftovers = groupLeftovers(pgid);
+  const leftovers = leftoversOf();
   for (const pid of leftovers.pids) {
     try { process.kill(pid, 'SIGKILL'); } catch (e) { /* ignore */ }
   }
   await sleep(300);
-  const finalLeftovers = groupLeftovers(pgid);
+  const finalLeftovers = leftoversOf();
 
   const cpu = cpuSeries.filter((v) => Number.isFinite(v));
   const avgCpu = cpu.length ? cpu.reduce((a, b) => a + b, 0) / cpu.length : 0;
@@ -528,6 +822,8 @@ async function profileRun(opts) {
 
   const profile = {
     runtime,
+    platform: process.platform,
+    memorySource: IS_LINUX ? 'smaps_rollup (PSS)' : (IS_WIN ? 'WorkingSetSize (CIM)' : 'ps rss / vmmap shared'),
     spawnPid: rootPid,
     usedXvfb: useXvfb,
     intervalMs,

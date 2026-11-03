@@ -22,6 +22,35 @@
 #include <poll.h>
 #endif
 
+// The webview engine loop pumps the host OS event loop: GTK on Linux, the Win32
+// message queue (WebView2) on Windows, and the Cocoa run loop (WKWebView) on
+// macOS. CEF drives its own pump (CefDoMessageLoopWork), so these are unused
+// there.
+#if !ADREN_FEATURE_CEF
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#elif defined(__APPLE__)
+#include <CoreFoundation/CoreFoundation.h>
+#endif
+#endif
+
+// Handles to the engine thread's native event loop, published by the loop itself
+// so the JS thread can wake it. A missed wake is harmless: the blocking pump has
+// a short timeout, so a queued task runs within one tick regardless.
+#if !ADREN_FEATURE_CEF
+#if defined(_WIN32)
+static std::atomic<unsigned long> g_engine_thread_id{0};
+// Upper bound on how long the blocking pump waits for a message, so a missed
+// wake is self-healing rather than a deadlock.
+constexpr DWORD kEnginePumpTimeoutMs = 50;
+#elif defined(__APPLE__)
+static std::atomic<CFRunLoopRef> g_engine_runloop{nullptr};
+#endif
+#endif
+
 #if ADREN_FEATURE_CEF
 #include "cef/adrenaline_app.h"
 #include "cef/adrenaline_client.h"
@@ -219,7 +248,34 @@ void EngineThreadMain() {
         }
     }
 #else
+    // WebView engines need the host OS event loop pumped on this one engine
+    // thread. `pumpBlocking` blocks until an event arrives (or a wakeup), and
+    // `pumpNonBlocking` returns immediately after draining the queue.
+#if defined(_WIN32)
+    // Register a message queue for this thread so PostThreadMessage can reach it.
+    g_engine_thread_id.store(GetCurrentThreadId());
+    auto pumpBlocking = []() {
+        // Wait for any input up to the timeout, then drain the queue. Bounded, so
+        // a missed wake is self-healing rather than a deadlock.
+        MsgWaitForMultipleObjects(0, nullptr, FALSE, kEnginePumpTimeoutMs, QS_ALLINPUT);
+        MSG msg;
+        while (PeekMessage(&msg, nullptr, 0, 0, PM_REMOVE)) {
+            TranslateMessage(&msg);
+            DispatchMessage(&msg);
+        }
+    };
+#elif defined(__APPLE__)
+    g_engine_runloop.store(CFRunLoopGetCurrent());
+    auto pumpBlocking = []() {
+        // kCFRunLoopDefaultMode == NSDefaultRunLoopMode. A short timeout keeps the
+        // loop responsive even if a wake is missed.
+        CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.05, /*returnAfterSourceHandled=*/true);
+    };
+#else
     GMainContext* ctx = g_main_context_default();
+    auto pumpBlocking = [ctx]() { g_main_context_iteration(ctx, TRUE); };
+#endif
+
     for (;;) {
         for (;;) {
             std::function<void()> task;
@@ -241,8 +297,8 @@ void EngineThreadMain() {
             }
         }
 
-        // Block until the next GTK/WebKit event or a wakeup from a new task.
-        g_main_context_iteration(ctx, TRUE);
+        // Block until the next host-OS event or a wakeup from a new task.
+        pumpBlocking();
     }
 #endif
 }
@@ -265,6 +321,14 @@ void PushEngineTask(std::function<void()> fn) {
     // Wake the CEF pump immediately so the task is not delayed until the next
     // poll timeout.
     adrenaline::SignalEngineWakeup();
+#elif defined(_WIN32)
+    // Post a no-op message to the *engine* thread so its bounded wait returns and
+    // the loop drains the queue.
+    unsigned long tid = g_engine_thread_id.load();
+    if (tid) PostThreadMessage(tid, WM_NULL, 0, 0);
+#elif defined(__APPLE__)
+    CFRunLoopRef rl = g_engine_runloop.load();
+    if (rl) CFRunLoopWakeUp(rl);
 #else
     g_main_context_wakeup(g_main_context_default());
 #endif
@@ -297,6 +361,29 @@ void DrainEngine(int max_ms) {
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
     }
 #else
+#if defined(_WIN32)
+    auto deadline = std::chrono::steady_clock::now() +
+                    std::chrono::milliseconds(max_ms);
+    MSG msg;
+    while (std::chrono::steady_clock::now() < deadline) {
+        bool any = false;
+        while (PeekMessage(&msg, nullptr, 0, 0, PM_REMOVE)) {
+            TranslateMessage(&msg);
+            DispatchMessage(&msg);
+            any = true;
+        }
+        if (!any) std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+#elif defined(__APPLE__)
+    auto deadline = std::chrono::steady_clock::now() +
+                    std::chrono::milliseconds(max_ms);
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.0, /*returnAfterSourceHandled=*/true)
+            != kCFRunLoopRunHandledSource) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+    }
+#else
     GMainContext* ctx = g_main_context_default();
     auto deadline = std::chrono::steady_clock::now() +
                     std::chrono::milliseconds(max_ms);
@@ -305,6 +392,7 @@ void DrainEngine(int max_ms) {
             std::this_thread::sleep_for(std::chrono::milliseconds(2));
         }
     }
+#endif
 #endif
 }
 
@@ -1044,6 +1132,17 @@ void ShutdownWindows() {
 #if ADREN_FEATURE_CEF
     // Break the pump out of poll() so it observes `stop` immediately.
     adrenaline::SignalEngineWakeup();
+#elif defined(_WIN32)
+    // Wake the engine thread's bounded wait so it observes `stop` immediately.
+    {
+        unsigned long tid = g_engine_thread_id.load();
+        if (tid) PostThreadMessage(tid, WM_NULL, 0, 0);
+    }
+#elif defined(__APPLE__)
+    {
+        CFRunLoopRef rl = g_engine_runloop.load();
+        if (rl) CFRunLoopWakeUp(rl);
+    }
 #else
     g_main_context_wakeup(g_main_context_default());
 #endif

@@ -19,11 +19,44 @@ const { ORDER, RUNTIMES } = require('./runtimes');
 
 const SUITE_DIR = __dirname;
 const REPO_ROOT = path.resolve(__dirname, '..', '..');
-const OUT = path.join(REPO_ROOT, 'benchmarks', 'ROYAL_RUMBLE_SHOWDOWN.md');
+// The report filename is overridable so the cross-platform CI matrix can emit
+// benchmarks/ROYAL_RUMBLE_WINDOWS.md and benchmarks/ROYAL_RUMBLE_MACOS.md while
+// a local Linux run keeps writing the canonical ROYAL_RUMBLE_SHOWDOWN.md.
+const OUT = path.join(REPO_ROOT, 'benchmarks', process.env.RUMBLE_REPORT || 'ROYAL_RUMBLE_SHOWDOWN.md');
 const EVIDENCE = path.join(SUITE_DIR, 'profiles-combined.json');
 
 const MB = 1024 * 1024;
 const MB_KB = 1024;
+
+const PLATFORM_LABEL = process.platform === 'win32' ? 'Windows'
+  : process.platform === 'darwin' ? 'macOS'
+  : 'Linux';
+
+// Where the memory numbers come from, in prose. PSS is a Linux concept; Windows
+// and macOS report resident/working-set figures that over-count shared pages.
+const MEMORY_PROBE = process.platform === 'linux' ? '`/proc`'
+  : process.platform === 'win32' ? 'Windows CIM (`Win32_Process`)'
+  : '`ps` + `vmmap`';
+
+function displayNote() {
+  if (process.platform === 'linux') return 'Xvfb (headless X server, `xvfb-run -a`)';
+  return 'Native ' + PLATFORM_LABEL + ' graphical session (no Xvfb)';
+}
+
+function memoryProbeNote() {
+  if (process.platform === 'linux') return '`benchmarks/stress-suite/profiler.js` (`/proc/[pid]/smaps_rollup` PSS + `/proc/[pid]/stat`)';
+  if (process.platform === 'win32') return '`benchmarks/stress-suite/profiler.js` (`Get-CimInstance Win32_Process`: WorkingSetSize + PrivatePageCount)';
+  return '`benchmarks/stress-suite/profiler.js` (`ps` RSS + `vmmap -summary` shared pages)';
+}
+
+/** Is the headline memory metric a true shared-aware (PSS) figure? */
+function memoryIsSharedAware(combined) {
+  // On Linux the profiler always uses PSS, so the platform alone decides; the
+  // evidence check keeps this correct for an explicit memorySource override.
+  if (process.platform === 'linux') return true;
+  const any = Object.values(combined)[0];
+  return !!(any && any.profile && any.profile.memorySource && /smaps_rollup/.test(any.profile.memorySource));
+}
 
 function mb(kb) { return kb / MB_KB; }
 function fmt(n, d = 1) { return Number.isFinite(n) ? n.toFixed(d) : 'n/a'; }
@@ -36,11 +69,17 @@ function cpuModel() {
     if (m) return m[1].trim();
     const hw = /^Hardware\s*:\s*(.+)$/m.exec(txt);
     if (hw) return hw[1].trim();
-  } catch (e) { /* ignore */ }
+  } catch (e) { /* not Linux */ }
   return os.cpus()[0] ? os.cpus()[0].model : 'unknown';
 }
 
 function osPretty() {
+  if (process.platform === 'win32') return 'Windows ' + os.release() + ' (' + os.arch() + ')';
+  if (process.platform === 'darwin') {
+    const r = spawnSync('sw_vers', ['-productVersion'], { encoding: 'utf8' });
+    const v = r.status === 0 ? r.stdout.trim() : os.release();
+    return 'macOS ' + v + ' (' + os.arch() + ')';
+  }
   try {
     const txt = fs.readFileSync('/etc/os-release', 'utf8');
     const m = /^PRETTY_NAME="?([^"\n]+)"?/m.exec(txt);
@@ -57,6 +96,8 @@ function pkgVersion(pkg, fallback) {
 }
 
 function webkitVersion() {
+  if (process.platform === 'darwin') return 'WebKit (Cocoa / system framework)';
+  if (process.platform === 'win32') return 'WebView2 (Edge / Evergreen runtime)';
   for (const v of ['webkit2gtk-4.1', 'webkit2gtk-4.0']) {
     const r = spawnSync('pkg-config', ['--modversion', v], { encoding: 'utf8' });
     if (r.status === 0) return 'WebKitGTK ' + r.stdout.trim();
@@ -115,8 +156,14 @@ function winner(values, lowerIsBetter = true) {
   return best;
 }
 
+const NUM_WORDS = ['zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten'];
+
 function buildReport(combined) {
-  const runtimes = ORDER.filter((r) => combined[r]);
+  // Order by the platform's canonical runtime order, then append anything else
+  // present (e.g. a merged run) so nothing is silently dropped.
+  const known = ORDER.filter((r) => combined[r]);
+  const extra = Object.keys(combined).filter((r) => combined[r] && !known.includes(r));
+  const runtimes = known.concat(extra);
   if (runtimes.length < 2) throw new Error('Need at least two runtimes in profiles-combined.json');
 
   const M = {};
@@ -124,6 +171,9 @@ function buildReport(combined) {
   const labels = {};
   for (const r of runtimes) labels[r] = (combined[r].label || (RUNTIMES[r] && RUNTIMES[r].label) || r);
 
+  const sharedAware = memoryIsSharedAware(combined);
+  const memLabel = sharedAware ? 'PSS' : 'Working Set';
+  const nWord = NUM_WORDS[runtimes.length] || String(runtimes.length);
   const duration = combined[runtimes[0]].profile.durationMs;
   const generatedAt = new Date().toISOString();
   const cores = os.cpus().length;
@@ -131,18 +181,24 @@ function buildReport(combined) {
   const P = (s) => lines.push(s);
 
   // ------------------------------------------------------------- title block
-  P('# 👑 The Royal Rumble: 5-Way JavaScript Desktop Runtime Showdown');
+  // The Linux run is the canonical showdown and keeps the original title/wording
+  // byte-for-byte; the cross-platform runs are labelled with their platform.
+  const titleSuffix = process.platform === 'linux' ? '' : ' (' + PLATFORM_LABEL + ')';
+  P('# 👑 The Royal Rumble: ' + runtimes.length + '-Way JavaScript Desktop Runtime Showdown' + titleSuffix);
   P('');
-  P('> An automated, reproducible, headless benchmark of five JavaScript desktop');
+  P('> An automated, reproducible, ' + (process.platform === 'linux' ? 'headless ' : '') + 'benchmark of ' + nWord + ' JavaScript desktop');
   P('> runtimes executing **one identical heavy desktop workload** for ' + (duration / 1000) + ' seconds each.');
   P('');
   P('| # | Runtime | Engine / Backend |');
   P('| :-- | :--- | :--- |');
+  const systemWebviewName = process.platform === 'darwin' ? 'System WebKit (Cocoa)'
+    : process.platform === 'win32' ? 'System WebView2 (Edge)'
+    : 'System WebKitGTK';
   const engineNote = {
     electron: 'Bundled Chromium + Node.js',
     nw: 'Bundled Chromium + Node.js (Node context in every window)',
     neutralino: 'OS system WebView + user-supplied backend process (here: Node.js extension)',
-    'adrenaline-webview': 'System WebKitGTK + Node.js backend',
+    'adrenaline-webview': systemWebviewName + ' + Node.js backend',
     'adrenaline-cef': 'Pruned CEF (Chromium Embedded Framework) + Node.js backend',
   };
   runtimes.forEach((r, i) => P('| ' + (i + 1) + ' | **' + labels[r] + '** | ' + (engineNote[r] || '') + ' |'));
@@ -157,7 +213,7 @@ function buildReport(combined) {
   // ---------------------------------------------------------------- summary
   P('## 1. Executive Summary');
   P('');
-  P('All five runtimes ran the *same application* — one shared frontend/backend');
+  P('All ' + nWord + ' runtimes ran the *same application* — one shared frontend/backend');
   P('codebase that renders and mutates a **10,000-record virtualised dataset**,');
   P('streams **100 JSON IPC packets/second** with per-packet round-trip timing, and');
   P('runs **2 SHA-256 CPU workers** saturating the remaining cores. The only');
@@ -178,7 +234,7 @@ function buildReport(combined) {
   P('- **Lowest IPC p95 latency:** ' + labels[p95Winner] + ' at **' + fmt(M[p95Winner].p95, 3) + ' ms**.');
   P('- **Lowest average CPU:** ' + labels[cpuWinner] + ' at **' + fmt(M[cpuWinner].avgCpu) + ' %**.');
   P('');
-  P('All measurements below come from `/proc` with ' + combined[runtimes[0]].profile.intervalMs + ' ms sampling over a');
+  P('All measurements below come from ' + MEMORY_PROBE + ' with ' + combined[runtimes[0]].profile.intervalMs + ' ms sampling over a');
   P((duration / 1000) + '-second sustained stress window, after a clean idle baseline. No value is');
   P('estimated, interpolated, or scaled.');
   P('');
@@ -199,15 +255,19 @@ function buildReport(combined) {
   P('| Node.js | ' + process.version + ' |');
   P('| Adrenaline.js | ' + adrenalineVersion() + ' |');
   P('| Adrenaline WebView engine | ' + webkitVersion() + ' |');
-  P('| Adrenaline CEF engine | ' + cefVersion() + ' |');
+  if (runtimes.includes('adrenaline-cef')) P('| Adrenaline CEF engine | ' + cefVersion() + ' |');
   P('| Electron | ' + pkgVersion('electron', 'unknown') + ' |');
   P('| NW.js | ' + pkgVersion('nw', 'unknown') + ' |');
   P('| Neutralinojs | ' + pkgVersion('@neutralinojs/neu', 'unknown') + ' CLI / v6.10.0 runtime |');
-  P('| Display | Xvfb (headless X server, `xvfb-run -a`) |');
+  P('| Display | ' + displayNote() + ' |');
   P('| Sampling interval | ' + combined[runtimes[0]].profile.intervalMs + ' ms |');
   P('| Stress duration | ' + (duration / 1000) + ' s per runtime |');
-  P('| Profiler | `benchmarks/stress-suite/profiler.js` (`/proc/[pid]/smaps_rollup`, `/proc/[pid]/stat`) |');
-  P('| Subreaper | `benchmarks/stress-suite/tools/reaper.c` (orphan reaping) |');
+  if (process.platform === 'linux') {
+    P('| Profiler | `benchmarks/stress-suite/profiler.js` (`/proc/[pid]/smaps_rollup`, `/proc/[pid]/stat`) |');
+    P('| Subreaper | `benchmarks/stress-suite/tools/reaper.c` (orphan reaping) |');
+  } else {
+    P('| Memory probe | ' + memoryProbeNote() + ' |');
+  }
   P('');
   P('---');
   P('');
@@ -232,8 +292,8 @@ function buildReport(combined) {
   }
 
   row('Startup Time (to first paint)', (m) => m.startupMs, 'ms', 0);
-  row('Idle Memory (PSS)', (m) => mb(m.idlePssKb), 'MB', 1);
-  row('Peak Stress Memory (PSS)', (m) => mb(m.peakPssKb), 'MB', 1);
+  row('Idle Memory (' + memLabel + ')', (m) => mb(m.idlePssKb), 'MB', 1);
+  row('Peak Stress Memory (' + memLabel + ')', (m) => mb(m.peakPssKb), 'MB', 1);
   row('Peak Private Memory', (m) => mb(m.peakPrivateKb), 'MB', 1);
   row('Avg CPU Load', (m) => m.avgCpu, '%', 1);
   row('Peak CPU Load', (m) => m.peakCpu, '%', 1);
@@ -252,8 +312,17 @@ function buildReport(combined) {
   P('');
   P('> "Runtime Disk Footprint" counts only what an application must ship on disk.');
   P('> Shared OS libraries that already exist on the target machine (for example the');
-  P('> system WebKitGTK that Adrenaline WebView and Neutralino use) are excluded and');
+  P('> ' + (process.platform === 'linux' ? 'system WebKitGTK' : 'system webview') +
+    ' that Adrenaline WebView and Neutralino use) are excluded and');
   P('> listed separately in §6.');
+  if (!sharedAware) {
+    P('>');
+    P('> **Memory metric note (' + PLATFORM_LABEL + '):** this platform has no PSS. The');
+    P('> shared-aware figure is the OS resident/working-set total, which counts every');
+    P('> shared framework page once per process, so it *over*-counts shared libraries');
+    P('> and must not be compared across platforms. Rankings within this report — all');
+    P('> captured on the same host — remain valid.');
+  }
   P('');
   P('---');
   P('');
@@ -287,18 +356,25 @@ function buildReport(combined) {
   P('');
 
   // -------------------------------------------------- process-by-process
-  P('## 5. Process-by-Process Memory Breakdown (peak PSS)');
+  P('## 5. Process-by-Process Memory Breakdown (peak ' + memLabel + ')');
   P('');
-  P('PSS (Proportional Set Size) divides each shared page by the number of');
-  P('processes sharing it, so these rows sum to the peak-stress total without');
-  P('double-counting shared framework libraries. Naive RSS would double-count');
-  P('every shared Chromium/WebKit `.so`.');
+  if (sharedAware) {
+    P('PSS (Proportional Set Size) divides each shared page by the number of');
+    P('processes sharing it, so these rows sum to the peak-stress total without');
+    P('double-counting shared framework libraries. Naive RSS would double-count');
+    P('every shared Chromium/WebKit `.so`.');
+  } else {
+    P('On this platform there is no PSS, so the shared-aware column is the process\'');
+    P('resident/working-set size and the private column is the unshareable portion.');
+    P('Both are summed over the whole tree, so shared framework pages are counted');
+    P('once per process (an over-count, never a crash or an under-count).');
+  }
   P('');
   for (const r of runtimes) {
     const p = combined[r].profile;
-    P('### ' + labels[r] + ' — ' + p.perProcess.length + ' processes, peak total ' + fmt(mb(p.peak.pssKb)) + ' MB PSS');
+    P('### ' + labels[r] + ' — ' + p.perProcess.length + ' processes, peak total ' + fmt(mb(p.peak.pssKb)) + ' MB ' + memLabel);
     P('');
-    P('| Process | PID | PSS (MB) | Private (MB) | RSS (MB) |');
+    P('| Process | PID | ' + memLabel + ' (MB) | Private (MB) | RSS (MB) |');
     P('| :--- | ---: | ---: | ---: | ---: |');
     for (const proc of p.perProcess) {
       const comm = proc.comm && proc.comm.trim() ? proc.comm.trim() : 'unknown';
@@ -307,9 +383,11 @@ function buildReport(combined) {
     P('| **Total** | | **' + fmt(mb(p.peak.pssKb)) + '** | **' + fmt(mb(p.peak.privateKb)) + '** | **' + fmt(mb(p.peak.rssKb)) + '** |');
     P('');
   }
-  P('> `Xvfb` and `xvfb-run` appear in every tree because the benchmark runs');
-  P('> headless. They are part of the harness, not the runtime.');
-  P('');
+  if (process.platform === 'linux') {
+    P('> `Xvfb` and `xvfb-run` appear in every tree because the benchmark runs');
+    P('> headless. They are part of the harness, not the runtime.');
+    P('');
+  }
   P('---');
   P('');
 
@@ -342,25 +420,27 @@ function buildReport(combined) {
   }
   P('');
   P('Startup is dominated by how much browser engine each runtime has to bring up.');
-  P('Electron, NW.js and CEF each initialise a Chromium browser process (plus its');
-  P('GPU/utility helpers) before a page can paint. The two system-WebView runtimes');
-  P('(Adrenaline WebView and Neutralino) delegate rendering to a WebKitGTK process');
+  P('Electron, NW.js' + (runtimes.includes('adrenaline-cef') ? ' and CEF' : '') + ' each initialise a Chromium browser process (plus its');
+  P('GPU/utility helpers) before a page can paint. ' +
+    (process.platform === 'linux' ? 'The two system-WebView runtimes' : 'The system-WebView runtimes'));
+  P('(Adrenaline WebView and Neutralino) delegate rendering to ' +
+    (process.platform === 'linux' ? 'a WebKitGTK process' : 'an OS-provided webview process'));
   P('the OS keeps warm, which is why they start in a similar range.');
   P('');
   P('### 7.2 Memory');
   P('');
-  P('| Runtime | Idle PSS (MB) | Peak PSS (MB) | Growth (MB) | Peak Private (MB) |');
+  P('| Runtime | Idle ' + memLabel + ' (MB) | Peak ' + memLabel + ' (MB) | Growth (MB) | Peak Private (MB) |');
   P('| :--- | ---: | ---: | ---: | ---: |');
   for (const r of runtimes) {
     P('| ' + labels[r] + ' | ' + fmt(mb(M[r].idlePssKb)) + ' | ' + fmt(mb(M[r].peakPssKb)) + ' | ' +
       fmt(mb(M[r].peakPssKb - M[r].idlePssKb)) + ' | ' + fmt(mb(M[r].peakPrivateKb)) + ' |');
   }
   P('');
-  P('The runtimes that bundle Chromium (Electron, NW.js, CEF) carry the cost of a');
+  P('The runtimes that bundle Chromium (Electron, NW.js' + (runtimes.includes('adrenaline-cef') ? ', CEF' : '') + ') carry the cost of a');
   P('full browser: a browser process, one or more renderers, a GPU process and');
   P('zygotes, each with its own heap and V8 isolate. The system-WebView runtimes');
   P('share the OS renderer, so their private footprint is lower even when their');
-  P('shared PSS is comparable.');
+  P('shared ' + (process.platform === 'linux' ? 'PSS' : 'footprint') + ' is comparable.');
   P('');
   P('### 7.3 CPU');
   P('');
@@ -398,9 +478,13 @@ function buildReport(combined) {
   P('');
   P('Bundled-Chromium runtimes ship the browser engine in the payload. Neutralino');
   P('and Adrenaline WebView ship only a small binary/addon and lean on the OS');
-  P('WebView. The CEF runtime sits in between: a real embedded Chromium, but');
-  P('pruned (locales reduced to `en-US`, devtools/PDF stripped, debug symbols');
-  P('removed) rather than shipped whole.');
+  if (runtimes.includes('adrenaline-cef')) {
+    P('WebView. The CEF runtime sits in between: a real embedded Chromium, but');
+    P('pruned (locales reduced to `en-US`, devtools/PDF stripped, debug symbols');
+    P('removed) rather than shipped whole.');
+  } else {
+    P('WebView (WebView2 on Windows, WebKit on macOS), which the OS already provides.');
+  }
   P('');
   P('### 7.6 Architectural trade-offs');
   P('');
@@ -415,12 +499,17 @@ function buildReport(combined) {
   P('   backend (here a Node.js extension over a local WebSocket). The trade-off is');
   P('   a heavier IPC path — its latency is an order of magnitude above the others');
   P('   because every message crosses a WebSocket hop.');
-  P('4. **Adrenaline.js (WebView)** — a thin native addon over the OS WebKitGTK,');
+  const webviewNote = process.platform === 'darwin' ? 'the OS Cocoa/WebKit webview'
+    : process.platform === 'win32' ? 'the OS WebView2 (Edge) webview'
+    : 'the OS WebKitGTK';
+  P('4. **Adrenaline.js (WebView)** — a thin native addon over ' + webviewNote + ',');
   P('   with a native (in-process) IPC bridge. Near-Neutralino disk footprint with');
   P('   Electron-class IPC latency, because the bridge does not leave the process.');
-  P('5. **Adrenaline.js (CEF)** — embeds a real Chromium for full fidelity, but');
-  P('   pruned and with native IPC. It pays a Chromium-sized disk and memory bill');
-  P('   while keeping the fast in-process bridge.');
+  if (runtimes.includes('adrenaline-cef')) {
+    P('5. **Adrenaline.js (CEF)** — embeds a real Chromium for full fidelity, but');
+    P('   pruned and with native IPC. It pays a Chromium-sized disk and memory bill');
+    P('   while keeping the fast in-process bridge.');
+  }
   P('');
   P('---');
   P('');
@@ -432,26 +521,46 @@ function buildReport(combined) {
   P('');
   P('```bash');
   P('npm install');
-  P('npm run benchmark:setup          # build both Adrenaline addons + fetch Neutralino');
-  P('npm run setup:cef                # pruned CEF distribution (for the CEF runtime)');
+  P('npm run benchmark:setup          # ' + (process.platform === 'linux' ? 'build both Adrenaline addons' : 'build the Adrenaline addons') + ' + fetch Neutralino');
+  if (process.platform === 'linux') P('npm run setup:cef                # pruned CEF distribution (for the CEF runtime)');
   P('cd benchmarks/stress-suite');
-  P('node run.js                      # all five runtimes, 30s each, sequentially');
-  P('node report.js                   # regenerate benchmarks/ROYAL_RUMBLE_SHOWDOWN.md');
+  P('node run.js                      # ' + (process.platform === 'linux' ? 'all five' : 'every available') + ' runtime' + (process.platform === 'linux' ? 's' : '') + ', ' + (duration / 1000) + 's each, sequentially');
+  P('node report.js                   # regenerate ' + (process.platform === 'linux' ? 'benchmarks/ROYAL_RUMBLE_SHOWDOWN.md' : 'the report for this platform'));
   P('```');
   P('');
   P('`npm run benchmark` runs the last two steps together. Requirements: Node.js');
-  P('≥ 16, `xvfb-run` + `Xvfb`, GTK3 + WebKitGTK 4.1 (for the WebView and');
-  P('Neutralino runs), `unzip` (Neutralino fetch), and a C compiler (`cc`/`gcc`) for');
-  P('the subreaper wrapper.');
+  if (process.platform === 'linux') {
+    P('≥ 16, `xvfb-run` + `Xvfb`, GTK3 + WebKitGTK 4.1 (for the WebView and');
+    P('Neutralino runs), `unzip` (Neutralino fetch), and a C compiler (`cc`/`gcc`) for');
+    P('the subreaper wrapper.');
+  } else if (process.platform === 'win32') {
+    P('≥ 18, the MSVC build tools (for the native addon) and the WebView2 Evergreen');
+    P('runtime (present on the GitHub-hosted `windows-latest` runner).');
+  } else {
+    P('≥ 18 and the Xcode Command Line Tools (for the native addon, which links the');
+    P('Cocoa and WebKit frameworks).');
+  }
   P('');
   P('### Measurement definitions');
   P('');
-  P('- **PSS (Proportional Set Size)** — read from `/proc/[pid]/smaps_rollup` for');
-  P('  every process in the tree and summed. A page shared by *N* processes');
-  P('  contributes *1/N* to each, so the tree total counts it exactly once.');
-  P('- **Private memory** — `Private_Clean + Private_Dirty`, the pages no other');
-  P('  process can share.');
-  P('- **CPU %** — the delta of `utime + stime` across the whole process tree');
+  if (sharedAware) {
+    P('- **PSS (Proportional Set Size)** — read from `/proc/[pid]/smaps_rollup` for');
+    P('  every process in the tree and summed. A page shared by *N* processes');
+    P('  contributes *1/N* to each, so the tree total counts it exactly once.');
+    P('- **Private memory** — `Private_Clean + Private_Dirty`, the pages no other');
+    P('  process can share.');
+  } else if (process.platform === 'win32') {
+    P('- **Working Set** — `WorkingSetSize` per process (via `Get-CimInstance');
+    P('  Win32_Process`), summed over the tree. Windows exposes no PSS, so this is the');
+    P('  closest shared-aware analogue.');
+    P('- **Private memory** — `PrivatePageCount`, the commit charge no other');
+    P('  process can share.');
+  } else {
+    P('- **Working Set / RSS** — resident size from `ps`, summed over the tree.');
+    P('  macOS exposes no PSS, so this is the closest shared-aware analogue.');
+    P('- **Private memory** — RSS minus the shared pages reported by `vmmap -summary`.');
+  }
+  P('- **CPU %** — the delta of ' + (process.platform === 'linux' ? '`utime + stime`' : 'cumulative CPU time') + ' across the whole process tree');
   P('  between samples divided by elapsed wall time. 100 % = one core fully busy.');
   P('- **IPC latency** — `process.hrtime.bigint()` captured immediately before the');
   P('  send and again when the renderer acknowledgement arrives.');
@@ -463,20 +572,33 @@ function buildReport(combined) {
   P('');
   P('### Fairness controls');
   P('');
-  P('- The five runs are **sequential, never concurrent**, so no two compete for CPU.');
+  P('- The ' + nWord + ' runs are **sequential, never concurrent**, so no two compete for CPU.');
   P('- Every runtime loads the **same `index.html`, `renderer.js` and stress core**;');
   P('  only the IPC binding differs (Adrenaline injects `window.adrenaline` natively,');
   P('  Electron uses `preload.js`, NW.js relays through the background page,');
   P('  Neutralino uses extension events).');
-  P('- All run headless under `xvfb-run -a` at the same window size.');
+  if (process.platform === 'linux') {
+    P('- All run headless under `xvfb-run -a` at the same window size.');
+  } else {
+    P('- All run in the native ' + PLATFORM_LABEL + ' graphical session at the same window size.');
+  }
   P('- The profiler samples the **entire process tree**, not just the top process.');
   P('');
   P('### Termination');
   P('');
-  P('Each run is launched detached under a minimal subreaper wrapper');
-  P('(`tools/reaper.c`). Termination uses an escalating SIGTERM → SIGKILL ladder on');
-  P('the whole process group, and the wrapper reaps orphans so no process — and no');
-  P('zombie — is left behind.');
+  if (process.platform === 'linux') {
+    P('Each run is launched detached under a minimal subreaper wrapper');
+    P('(`tools/reaper.c`). Termination uses an escalating SIGTERM → SIGKILL ladder on');
+    P('the whole process group, and the wrapper reaps orphans so no process — and no');
+    P('zombie — is left behind.');
+  } else if (process.platform === 'win32') {
+    P('Each run is terminated by walking the process tree with `taskkill /T /F`,');
+    P('falling back to a per-PID sweep, so no child process is left behind.');
+  } else {
+    P('Each run is launched in its own process group and terminated with an escalating');
+    P('SIGTERM → SIGKILL ladder on the whole group, followed by a per-PID sweep, so no');
+    P('child process is left behind.');
+  }
   P('');
   P('| Runtime | Term. time (ms) | Escalated to SIGKILL | Leftover live procs | Clean |');
   P('| :--- | ---: | :--- | ---: | :--- |');
