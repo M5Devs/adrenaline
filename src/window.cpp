@@ -15,6 +15,7 @@
 #include <vector>
 #include <utility>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <algorithm>
 
@@ -67,6 +68,12 @@ static std::atomic<CFRunLoopRef> g_engine_runloop{nullptr};
 #include "include/wrapper/cef_helpers.h"
 #include <dlfcn.h>
 #include <unistd.h>
+#elif ADREN_FEATURE_WEBGTK
+// The WebGTK engine (github.com/M5Devs/webgtk) is a GTK3/GTK4 GtkGLArea that
+// presents the pruned Blink/V8 offscreen frames. It is a plain C ABI, so the
+// embedder also pulls in GTK itself to host the top-level window.
+#include <gtk/gtk.h>
+#include <webgtk/webgtk.h>
 #else
 #include "vendor/webview.h"
 #endif
@@ -103,6 +110,13 @@ struct WindowInstance {
     // Set from OnBeforeClose (engine thread) once CEF has fully torn the browser
     // down. Shutdown waits on this instead of a fixed drain timeout.
     std::atomic<bool> browser_closed{false};
+#elif ADREN_FEATURE_WEBGTK
+    // WebGTK engine state. Like the webview path, it is owned by the engine
+    // thread and only ever touched from it; the JS thread posts tasks.
+    webgtk_view* view{nullptr};
+    GtkWidget* gtk_window{nullptr};
+    // Repeating main-context source that drains the renderer IPC queue.
+    guint ipc_timer{0};
 #else
     // Owned by the engine thread and only ever touched from it. The JS thread
     // interacts with it exclusively by posting tasks to the engine queue.
@@ -131,6 +145,27 @@ static std::vector<std::shared_ptr<WindowInstance>>& closed_windows() {
     return *v;
 }
 static std::mutex g_closed_mutex;
+
+#if ADREN_FEATURE_WEBGTK
+// GTK 'destroy' handler for a WebGTK top-level window. The GTK main context is
+// never quit explicitly (all windows share the one engine-thread context), so a
+// closed window quits the app unless it is prevented, exactly like the webview
+// engine. The view owns its widget, so dropping the view reference detaches and
+// finalises the GtkGLArea.
+void OnGtkWindowDestroyed(GtkWidget* /*widget*/, gpointer data) {
+    auto* instance = static_cast<WindowInstance*>(data);
+    if (!instance) return;
+    if (instance->ipc_timer) {
+        g_source_remove(instance->ipc_timer);
+        instance->ipc_timer = 0;
+    }
+    if (instance->view) {
+        webgtk_view_destroy(instance->view);
+        instance->view = nullptr;
+    }
+    instance->gtk_window = nullptr;
+}
+#endif
 
 #if ADREN_FEATURE_CEF
 // Every CEF window, tracked only while its browser lifecycle is pending: entries
@@ -349,6 +384,121 @@ void RunOnEngine(const std::function<void()>& fn) {
     finished.wait();
 }
 
+#if ADREN_FEATURE_WEBGTK
+// WebGTK's C ABI exposes `webgtk_view_evaluate_javascript` but no native
+// function-binding hook, so the renderer bridge is driven by a periodic
+// evaluate: the script below installs `window.adrenaline` (idempotently, so it
+// re-arms itself after every navigation) and returns one queued outbound
+// message as a JSON `[channel, data]` array, or `null` when the queue is empty.
+// The returned value therefore has exactly the shape the webview engine's
+// `__adrenaline_ipc_send` binding produces, so the JS-side handler is shared.
+constexpr const char* kWebGtkIpcScript = R"raw(
+(function () {
+  if (!window.adrenaline) {
+    window.adrenaline = {};
+    window.adrenaline._listeners = {};
+    window.adrenaline.on = function (channel, cb) {
+      (window.adrenaline._listeners[channel] = window.adrenaline._listeners[channel] || []).push(cb);
+    };
+    window.adrenaline._onMessage = function (channel, data) {
+      var cbs = window.adrenaline._listeners[channel];
+      if (cbs) { cbs.slice().forEach(function (cb) { cb(data); }); }
+    };
+    window.__adrenaline_callbacks = window.__adrenaline_callbacks || {};
+    window.__adrenaline_ipc_reply = function (reqId, err, result) {
+      var cb = window.__adrenaline_callbacks[reqId];
+      if (cb) {
+        if (err) cb.reject(new Error(err));
+        else cb.resolve(result);
+        delete window.__adrenaline_callbacks[reqId];
+      }
+    };
+    window.adrenaline.send = function (channel, data) {
+      (window.__adrenaline_ipc_queue = window.__adrenaline_ipc_queue || []).push([channel, data === undefined ? null : data]);
+      return true;
+    };
+    window.adrenaline.invoke = function (channel, data) {
+      return new Promise(function (resolve, reject) {
+        var reqId = Math.random().toString(36).substring(2) + Date.now();
+        window.__adrenaline_callbacks[reqId] = { resolve: resolve, reject: reject };
+        window.adrenaline.send('__adrenaline_ipc_invoke', { reqId: reqId, channel: channel, data: data });
+      });
+    };
+  }
+  var q = window.__adrenaline_ipc_queue;
+  if (!q || q.length === 0) return null;
+  return q.shift();
+})()
+)raw";
+
+// How often the IPC pump polls the renderer queue. A drained message is
+// forwarded immediately; the interval only bounds how long an idle queue waits.
+constexpr guint kWebGtkIpcIntervalMs = 4;
+
+void WebGtkOnIpcResult(const char* json_result, void* user_data);
+
+// Runs on the engine thread (inside the GTK main context) on a repeating timer.
+// Installs the renderer bridge if needed and drains at most one queued outbound
+// message per tick.
+gboolean WebGtkIpcTick(gpointer user_data) {
+    auto* instance = static_cast<WindowInstance*>(user_data);
+    if (!instance || !instance->view) return G_SOURCE_CONTINUE;
+    webgtk_view_evaluate_javascript(instance->view, kWebGtkIpcScript,
+                                    &WebGtkOnIpcResult, instance);
+    return G_SOURCE_CONTINUE;
+}
+
+// Forwards one drained `[channel, data]` payload to the JS thread through the
+// instance TSFN, reusing the exact envelope the webview engine produces.
+void WebGtkForwardIpc(WindowInstance* instance, const std::string& payload) {
+    if (!instance->has_tsfn || instance->tsfn_released) {
+        return;
+    }
+    std::string* raw_req = new std::string(payload);
+    napi_status status = instance->tsfn.NonBlockingCall(raw_req, [](Napi::Env env, Napi::Function jsCallback, std::string* data) {
+        if (env != nullptr && jsCallback != nullptr && data != nullptr) {
+            Napi::HandleScope scope(env);
+            Napi::Object global = env.Global();
+            Napi::Object jsonObj = global.Get("JSON").As<Napi::Object>();
+            Napi::Function parseFn = jsonObj.Get("parse").As<Napi::Function>();
+
+            Napi::Value parsedReqVal;
+            try {
+                parsedReqVal = parseFn.Call(jsonObj, { Napi::String::New(env, *data) });
+            } catch (...) {
+                parsedReqVal = env.Null();
+            }
+
+            Napi::Value channelVal = env.Undefined();
+            Napi::Value dataVal = env.Undefined();
+            if (parsedReqVal.IsArray()) {
+                Napi::Array arr = parsedReqVal.As<Napi::Array>();
+                if (arr.Length() > 0) channelVal = arr.Get((uint32_t)0);
+                if (arr.Length() > 1) dataVal = arr.Get((uint32_t)1);
+            }
+
+            jsCallback.Call({ channelVal, dataVal });
+        }
+        delete data;
+    });
+    if (status != napi_ok) {
+        delete raw_req;
+    }
+}
+
+// Result of one pump evaluate: the script returns `[channel, data]` for a
+// queued message and `null` otherwise. Anything that is not a JSON array (an
+// empty queue, or the mock backend's non-executing echo envelope) is ignored.
+void WebGtkOnIpcResult(const char* json_result, void* user_data) {
+    auto* instance = static_cast<WindowInstance*>(user_data);
+    if (!instance || !json_result) return;
+    const char* p = json_result;
+    while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') ++p;
+    if (*p != '[') return;
+    WebGtkForwardIpc(instance, json_result);
+}
+#endif
+
 // Let pending engine work settle before tearing a window down. Destroying a
 // webview while WebKit is still loading leaves JSC state that aborts during
 // process exit, so pump the loop until it goes quiet (or the budget expires).
@@ -556,6 +706,29 @@ bool EnsureCefInitialized() {
     return true;
 }
 #endif
+
+#if ADREN_FEATURE_WEBGTK
+// GTK must be initialised exactly once, on the engine thread that pumps its main
+// context. gtk_init() (unlike gtk_init_check()) aborts the process when no
+// display is available, so use the checked variant and report failure.
+bool EnsureGtkInitialized() {
+    static bool initialized = false;
+    static bool failed = false;
+    if (initialized) return true;
+    if (failed) return false;
+    // GTK3's gtk_init() takes argc/argv; an addon has none, so pass empty ones.
+    int argc = 0;
+    char** argv = nullptr;
+    if (!gtk_init_check(&argc, &argv)) {
+        std::cerr << "Adrenaline: gtk_init_check failed (no display?)" << std::endl;
+        failed = true;
+        return false;
+    }
+    initialized = true;
+    return true;
+}
+#endif
+
 } // namespace
 
 
@@ -570,6 +743,7 @@ Napi::Value GetCompiledFeatures(const Napi::CallbackInfo& info) {
     feats.Set("cleanPrivacy", Napi::Boolean::New(env, ADREN_FEATURE_CLEAN_PRIVACY != 0));
     feats.Set("cef", Napi::Boolean::New(env, ADREN_FEATURE_CEF != 0));
     feats.Set("webview", Napi::Boolean::New(env, ADREN_FEATURE_WEBVIEW != 0));
+    feats.Set("webgtk", Napi::Boolean::New(env, ADREN_FEATURE_WEBGTK != 0));
 
     return feats;
 }
@@ -798,7 +972,7 @@ Napi::Value CreateWindow(const Napi::CallbackInfo& info) {
             std::cerr << "Adrenaline Window Unknown Exception" << std::endl;
         }
     });
-#else
+#elif ADREN_FEATURE_WEBVIEW
     PushEngineTask([instance]() {
         try {
             bool debug_flag = false;
@@ -917,6 +1091,73 @@ Napi::Value CreateWindow(const Napi::CallbackInfo& info) {
             instance->wv.reset();
         }
     });
+#elif ADREN_FEATURE_WEBGTK
+    PushEngineTask([instance]() {
+        try {
+            if (!EnsureGtkInitialized()) {
+                return;
+            }
+
+            // The view is the WebGTK engine: a GtkGLArea presenting the pruned
+            // Blink/V8 offscreen frames. It is packed into a top-level GTK
+            // window here because WebGTK exposes a view, not a window.
+            webgtk_view* view = webgtk_view_new(instance->width, instance->height);
+            if (!view) {
+                std::cerr << "Adrenaline: webgtk_view_new failed" << std::endl;
+                return;
+            }
+
+            GtkWidget* widget = static_cast<GtkWidget*>(webgtk_view_get_widget(view));
+            if (!widget) {
+                std::cerr << "Adrenaline: webgtk view has no widget" << std::endl;
+                webgtk_view_destroy(view);
+                return;
+            }
+
+            GtkWidget* window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
+            gtk_window_set_title(GTK_WINDOW(window), instance->title.c_str());
+            gtk_window_set_default_size(GTK_WINDOW(window), instance->width, instance->height);
+            if (!instance->resizable) {
+                gtk_window_set_resizable(GTK_WINDOW(window), FALSE);
+            }
+            if (instance->minWidth > 0 || instance->minHeight > 0) {
+                GdkGeometry hints{};
+                hints.min_width = instance->minWidth;
+                hints.min_height = instance->minHeight;
+                gtk_window_set_geometry_hints(GTK_WINDOW(window), nullptr, &hints,
+                                              static_cast<GdkWindowHints>(GDK_HINT_MIN_SIZE));
+            }
+            if (instance->maxWidth > 0 || instance->maxHeight > 0) {
+                GdkGeometry hints{};
+                hints.max_width = instance->maxWidth;
+                hints.max_height = instance->maxHeight;
+                gtk_window_set_geometry_hints(GTK_WINDOW(window), nullptr, &hints,
+                                              static_cast<GdkWindowHints>(GDK_HINT_MAX_SIZE));
+            }
+            // A closed window ends the app: unref the view (the view owns its
+            // widget) and destroy the window, matching the webview engine.
+            g_signal_connect(window, "destroy", G_CALLBACK(OnGtkWindowDestroyed), instance.get());
+            gtk_container_add(GTK_CONTAINER(window), widget);
+            gtk_widget_show_all(window);
+
+            instance->view = view;
+            instance->gtk_window = window;
+
+            // Drain the renderer's outbound IPC queue on a main-context timer.
+            // The first tick also installs the `window.adrenaline` bridge.
+            instance->ipc_timer = g_timeout_add(kWebGtkIpcIntervalMs, &WebGtkIpcTick, instance.get());
+
+            if (!instance->html.empty()) {
+                webgtk_view_load_html(view, instance->html.c_str(), instance->html.size());
+            } else if (!instance->url.empty()) {
+                webgtk_view_load_uri(view, instance->url.c_str());
+            }
+        } catch (const std::exception& e) {
+            std::cerr << "Adrenaline Window Exception: " << e.what() << std::endl;
+        } catch (...) {
+            std::cerr << "Adrenaline Window Unknown Exception" << std::endl;
+        }
+    });
 #endif
 
     return Napi::Number::New(env, window_id);
@@ -961,6 +1202,14 @@ Napi::Value CloseWindow(const Napi::CallbackInfo& info) {
                 instance->browser->GetHost()->CloseBrowser(false);
             }
         });
+#elif ADREN_FEATURE_WEBGTK
+        // Destroying the top-level window fires the "destroy" handler, which
+        // unrefs the view and stops the IPC timer on the engine thread.
+        RunOnEngine([instance]() {
+            if (instance->gtk_window) {
+                gtk_widget_destroy(instance->gtk_window);
+            }
+        });
 #endif
         return Napi::Boolean::New(env, true);
     }
@@ -993,6 +1242,10 @@ Napi::Value EvalWindow(const Napi::CallbackInfo& info) {
 #if ADREN_FEATURE_CEF
             if (instance->browser && instance->browser->GetMainFrame()) {
                 instance->browser->GetMainFrame()->ExecuteJavaScript(script, "", 0);
+            }
+#elif ADREN_FEATURE_WEBGTK
+            if (instance->view) {
+                webgtk_view_evaluate_javascript(instance->view, script.c_str(), nullptr, nullptr);
             }
 #else
             if (instance->wv) {
@@ -1039,6 +1292,10 @@ Napi::Value NavigateWindow(const Napi::CallbackInfo& info) {
 #if ADREN_FEATURE_CEF
             if (instance->browser && instance->browser->GetMainFrame()) {
                 instance->browser->GetMainFrame()->LoadURL(url);
+            }
+#elif ADREN_FEATURE_WEBGTK
+            if (instance->view) {
+                webgtk_view_load_uri(instance->view, url.c_str());
             }
 #else
             if (instance->wv) {
@@ -1119,6 +1376,29 @@ void ShutdownWindows() {
         }
         CefShutdown();
         RemoveCefCacheDir(ResolveCefCacheDir());
+#elif ADREN_FEATURE_WEBGTK
+        // Unref every still-open view on the engine thread while the GL context
+        // is still current, then let pending frame work settle. Windows closed
+        // earlier already dropped their view in OnGtkWindowDestroyed.
+        std::vector<std::shared_ptr<WindowInstance>> snapshot;
+        {
+            std::lock_guard<std::mutex> lock(g_windows_mutex);
+            for (auto& entry : windows_map()) {
+                snapshot.push_back(entry.second);
+            }
+        }
+        for (auto& inst : snapshot) {
+            if (inst->ipc_timer) {
+                g_source_remove(inst->ipc_timer);
+                inst->ipc_timer = 0;
+            }
+            if (inst->view) {
+                webgtk_view_destroy(inst->view);
+                inst->view = nullptr;
+            }
+            inst->gtk_window = nullptr;
+        }
+        DrainEngine(200);
 #else
         DrainEngine(500);
 #endif

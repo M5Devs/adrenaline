@@ -10,7 +10,7 @@ const resolved = resolver.resolve(path.join(__dirname, '..'));
 
 // 1. Verify feature object structure and types
 assert.ok(features, 'features object should exist');
-['devtools', 'localFiles', 'pdf', 'webrtc', 'cleanPrivacy', 'cef', 'webview'].forEach((key) => {
+['devtools', 'localFiles', 'pdf', 'webrtc', 'cleanPrivacy', 'cef', 'webview', 'webgtk'].forEach((key) => {
     assert.strictEqual(typeof features[key], 'boolean', `features.${key} should be boolean`);
 });
 
@@ -23,7 +23,8 @@ assert.strictEqual(features.localFiles, resolved.modules.localFiles, 'compiled l
 
 // Engine selection: exactly one engine is compiled in, and the requested
 // engine is surfaced on features.config.
-assert.notStrictEqual(features.cef, features.webview, 'exactly one engine should be compiled in');
+const engineCount = [features.cef, features.webview, features.webgtk].filter(Boolean).length;
+assert.strictEqual(engineCount, 1, 'exactly one engine should be compiled in');
 assert.strictEqual(features.config.engine, resolved.engine, 'features.config.engine should reflect the requested engine');
 
 // 3. The resolver snapshot is surfaced on the features object

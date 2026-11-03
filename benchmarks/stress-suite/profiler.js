@@ -422,11 +422,6 @@ function measureFootprint(runtime, opts) {
     components.push({ label: 'electron/dist (Chromium + Node + ICU + V8 snapshots)', bytes: duBytes(path.join(root, 'node_modules', 'electron', 'dist')) });
     components.push({ label: 'application assets (app/)', bytes: duBytes(appDir) });
     components.push({ label: 'runner code', bytes: runnerBytes(['electron-runner.js', 'profiler.js', 'run.js', 'report.js']) });
-  } else if (runtime === 'nw') {
-    const nwDist = nwDistributionDir(root);
-    components.push({ label: 'NW.js distribution (nw binary + Chromium + Node + ICU)', bytes: duBytes(nwDist) });
-    components.push({ label: 'application assets (app/)', bytes: duBytes(appDir) });
-    components.push({ label: 'runner code (nw-app/)', bytes: duBytes(path.join(suite, 'nw-app')) });
   } else if (runtime === 'neutralino') {
     const neuBin = neutralinoBinaryName();
     components.push({ label: 'Neutralino binary (' + neuBin + ')', bytes: fileBytes(path.join(suite, 'neu-app', neuBin)) });
@@ -448,6 +443,21 @@ function measureFootprint(runtime, opts) {
     components.push({ label: 'core .pak bundles + locales (pruned to en-US)', bytes: duBytes(path.join(cef, 'Resources')) + fileBytes(path.join(cef, 'Release', 'v8_context_snapshot.bin')) });
     components.push({ label: 'libEGL.so + libGLESv2.so + swiftshader/vulkan', bytes: fileBytes(path.join(cef, 'Release', 'libEGL.so')) + fileBytes(path.join(cef, 'Release', 'libGLESv2.so')) + fileBytes(path.join(cef, 'Release', 'libvk_swiftshader.so')) + fileBytes(path.join(cef, 'Release', 'libvulkan.so.1')) });
     components.push({ label: 'runner code', bytes: runnerBytes(['adrenaline-runner.js', 'profiler.js', 'run.js', 'report.js']) });
+  } else if (runtime === 'adrenaline-webgtk') {
+    adrenalineCore();
+    components.push({ label: 'adrenaline native addon (WebGTK engine)', bytes: fileBytes(path.join(root, '.bench-artifacts', 'adrenaline-webgtk.node')) });
+    // The WebGTK view itself (libwebgtk.so) plus the pruned Blink/V8 engine it
+    // presents as an OpenGL texture. When only the mock backend is present the
+    // engine directory is absent, so those components simply do not count.
+    components.push({ label: 'libwebgtk.so (WebGTK OSR view)', bytes: fileBytes(path.join(root, 'vendor', 'webgtk', 'lib', 'libwebgtk.so')) });
+    const engineDir = process.env.WEBGTK_ENGINE_DIR || path.join(root, 'vendor', 'webgtk-src', 'engine', 'prebuilt');
+    if (fs.existsSync(engineDir)) {
+      components.push({ label: 'WebGTK Blink/V8 engine archive (lib/*.so)', bytes: duBytes(path.join(engineDir, 'lib')) });
+    }
+    components.push({ label: 'runner code', bytes: runnerBytes(['adrenaline-runner.js', 'profiler.js', 'run.js', 'report.js']) });
+    // GTK is a shared OS library on a normal Linux desktop, like WebKitGTK.
+    const gtk = systemGtkBytes();
+    if (gtk) components.push({ label: 'system GTK3 shared library (NOT shipped)', bytes: gtk, shared: true });
   } else {
     adrenalineCore();
     components.push({ label: 'adrenaline native addon (WebView engine)', bytes: fileBytes(path.join(root, '.bench-artifacts', 'adrenaline-webview.node')) });
@@ -463,19 +473,27 @@ function measureFootprint(runtime, opts) {
   return { runtime, components, total, shippedTotal };
 }
 
-function nwDistributionDir(root) {
-  const base = path.join(root, 'node_modules', 'nw');
-  try {
-    const entry = fs.readdirSync(base).find((n) => n.startsWith('nwjs-'));
-    if (entry) return path.join(base, entry);
-  } catch (e) { /* ignore */ }
-  return base;
-}
-
 function systemWebViewLabel() {
   if (IS_WIN) return 'system WebView2 runtime (NOT shipped)';
   if (IS_MAC) return 'system WebKit framework (NOT shipped)';
   return 'system WebKitGTK shared library (NOT shipped)';
+}
+
+/** Size of the GTK3 stack the WebGTK view links instead of shipping. */
+function systemGtkBytes() {
+  if (IS_WIN || IS_MAC) return 0;
+  const r = spawnSync('ldconfig', ['-p'], { encoding: 'utf8' });
+  if (r.status !== 0) return 0;
+  let total = 0;
+  for (const line of r.stdout.split('\n')) {
+    for (const n of ['libgtk-3.so.0', 'libgdk-3.so.0', 'libglib-2.0.so.0', 'libgobject-2.0.so.0']) {
+      if (line.includes(n)) {
+        const m = /=>\s+(\S+)/.exec(line);
+        if (m) { total += fileBytes(m[1]); break; }
+      }
+    }
+  }
+  return total;
 }
 
 /** Size of the OS-provided webview that the runtime links instead of shipping. */
@@ -639,7 +657,7 @@ async function profileRun(opts) {
     extraArgs = [],
     // Explicit command form: [binary, ...args]. When given it replaces
     // `launcher` + `runnerPath` + `extraArgs`, which lets runtimes that are not
-    // driven by Node (NW.js, Neutralinojs) be launched the same way.
+    // driven by Node (Neutralinojs) be launched the same way.
     command = null,
     // Working directory for the runtime process (Neutralino needs its own).
     runCwd = null,

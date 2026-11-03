@@ -11,6 +11,8 @@
  *   - src/cef/adrenaline_app.cpp -> compile-time command line switches
  */
 module.exports = {
+  // 'webview' (system WebView, lightest), 'cef' (pruned Chromium, consistent)
+  // or 'webgtk' (custom GTK3/GTK4 Blink/V8 OSR view from M5Devs/webgtk).
   engine: 'cef',
   modules: {
     devtools: false,          // Drop devtools resources (devtools_resources.pak, etc.)

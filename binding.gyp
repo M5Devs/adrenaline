@@ -1,7 +1,10 @@
 {
   "variables": {
     "adren_engine%": "<!(node -p \"process.env.ADREN_ENGINE || 'webview'\")",
-    "cef_root": "<!(node -p \"require('path').resolve(process.env.CEF_ROOT || 'vendor/cef')\")"
+    "cef_root": "<!(node -p \"require('path').resolve(process.env.CEF_ROOT || 'vendor/cef')\")",
+    "webgtk_root%": "<!(node -p \"require('path').resolve(process.env.WEBGTK_ROOT || 'vendor/webgtk')\")",
+    "webgtk_include%": "<!(node -p \"require('path').resolve(process.env.WEBGTK_INCLUDE_DIR || (process.env.WEBGTK_ROOT || 'vendor/webgtk') + '/include')\")",
+    "webgtk_lib%": "<!(node -p \"require('path').resolve(process.env.WEBGTK_LIB_DIR || (process.env.WEBGTK_ROOT || 'vendor/webgtk') + '/lib')\")"
   },
   "targets": [
     {
@@ -58,17 +61,34 @@
           }
         ],
         [
+          "adren_engine=='webgtk'",
+          {
+            "defines": [
+              "ADREN_FEATURE_WEBGTK=1",
+              "ADREN_FEATURE_WEBVIEW=0"
+            ],
+            "include_dirs": [
+              "<(webgtk_include)"
+            ],
+            "libraries": [
+              "-L<(webgtk_lib)",
+              "-lwebgtk",
+              "-Wl,-rpath,<(webgtk_lib)"
+            ]
+          }
+        ],
+        [
           "OS=='linux'",
           {
             "cflags": [
-              "<!@(pkg-config --cflags gtk+-3.0 webkit2gtk-4.1 2>/dev/null || pkg-config --cflags gtk+-3.0 webkit2gtk-4.0)"
+              "<!@(pkg-config --cflags gtk+-3.0 webkit2gtk-4.1 2>/dev/null || pkg-config --cflags gtk+-3.0 webkit2gtk-4.0 2>/dev/null || pkg-config --cflags gtk+-3.0)"
             ],
             "ldflags": [
-              "<!@(pkg-config --libs gtk+-3.0 webkit2gtk-4.1 2>/dev/null || pkg-config --libs gtk+-3.0 webkit2gtk-4.0)"
+              "<!@(pkg-config --libs gtk+-3.0 webkit2gtk-4.1 2>/dev/null || pkg-config --libs gtk+-3.0 webkit2gtk-4.0 2>/dev/null || pkg-config --libs gtk+-3.0)"
             ],
             "libraries": [
               "-lX11",
-              "<!@(pkg-config --libs gtk+-3.0 webkit2gtk-4.1 2>/dev/null || pkg-config --libs gtk+-3.0 webkit2gtk-4.0)"
+              "<!@(pkg-config --libs gtk+-3.0 webkit2gtk-4.1 2>/dev/null || pkg-config --libs gtk+-3.0 webkit2gtk-4.0 2>/dev/null || pkg-config --libs gtk+-3.0)"
             ]
           }
         ],

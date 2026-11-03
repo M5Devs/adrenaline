@@ -17,7 +17,8 @@
  *   - adrenaline-webview : Linux (WebKitGTK), macOS (Cocoa/WebKit), Windows (WebView2)
  *   - adrenaline-cef     : Linux only. The vendored CEF build + setup-cef.js are
  *                          linux64-only, so it is omitted elsewhere.
- *   - electron / nw      : all three (their npm installers fetch the right binary)
+ *   - adrenaline-webgtk  : Linux only. WebGTK is a GTK3/GTK4 Blink/V8 OSR view.
+ *   - electron           : all three (its npm installer fetches the right binary)
  *   - neutralino         : all three (the release zip carries every platform binary)
  */
 
@@ -32,20 +33,6 @@ function electronBinary(repoRoot) {
   const pkg = path.join(repoRoot, 'node_modules', 'electron');
   const rel = fs.readFileSync(path.join(pkg, 'path.txt'), 'utf8').trim();
   return path.join(pkg, 'dist', rel);
-}
-
-function nwDistributionDir(repoRoot) {
-  const base = path.join(repoRoot, 'node_modules', 'nw');
-  const dir = fs.readdirSync(base).find((n) => n.startsWith('nwjs-'));
-  return path.join(base, dir);
-}
-
-/** Path to the NW.js executable inside its distribution directory. */
-function nwBinary(repoRoot) {
-  const dist = nwDistributionDir(repoRoot);
-  if (IS_WIN) return path.join(dist, 'nw.exe');
-  if (IS_MAC) return path.join(dist, 'nwjs.app', 'Contents', 'MacOS', 'nwjs');
-  return path.join(dist, 'nw');
 }
 
 /** Name of the shipped Neutralinojs runtime binary for this platform/arch. */
@@ -95,6 +82,22 @@ const RUNTIMES = {
     },
   },
 
+  'adrenaline-webgtk': {
+    label: 'Adrenaline.js (WebGTK)',
+    footprintRuntime: 'adrenaline-webgtk',
+    platforms: ['linux'],
+    command({ repoRoot, suiteDir }) {
+      return {
+        command: [process.execPath, path.join(suiteDir, 'adrenaline-runner.js')],
+        cwd: repoRoot,
+        env: {
+          ADREN_ADDON_PATH: path.join(repoRoot, '.bench-artifacts', 'adrenaline-webgtk.node'),
+          WEBGTK_ROOT: path.join(repoRoot, 'vendor', 'webgtk'),
+        },
+      };
+    },
+  },
+
   electron: {
     label: 'Electron',
     footprintRuntime: 'electron',
@@ -103,19 +106,6 @@ const RUNTIMES = {
       return {
         command: [electronBinary(repoRoot), path.join(suiteDir, 'electron-runner.js'), '--no-sandbox', '--disable-gpu'],
         cwd: repoRoot,
-        env: {},
-      };
-    },
-  },
-
-  nw: {
-    label: 'NW.js',
-    footprintRuntime: 'nw',
-    platforms: ['linux', 'darwin', 'win32'],
-    command({ repoRoot, suiteDir }) {
-      return {
-        command: [nwBinary(repoRoot), path.join(suiteDir, 'nw-app')],
-        cwd: path.join(suiteDir, 'nw-app'),
         env: {},
       };
     },
@@ -137,10 +127,10 @@ const RUNTIMES = {
 };
 
 // Linux runs the full five-way showdown; other platforms run the subset that is
-// actually provisionable there (CEF is linux64-only). The order groups the two
-// Adrenaline engines last so the report reads identically to the Linux one.
-const LINUX_ORDER = ['electron', 'nw', 'neutralino', 'adrenaline-webview', 'adrenaline-cef'];
-const PORTABLE_ORDER = ['electron', 'nw', 'neutralino', 'adrenaline-webview'];
+// actually provisionable there (CEF and WebGTK are Linux-only). The order groups
+// the Adrenaline engines last so the report reads identically to the Linux one.
+const LINUX_ORDER = ['electron', 'neutralino', 'adrenaline-webview', 'adrenaline-cef', 'adrenaline-webgtk'];
+const PORTABLE_ORDER = ['electron', 'neutralino', 'adrenaline-webview'];
 
 function runtimeOrder() {
   if (process.platform === 'linux') return LINUX_ORDER;

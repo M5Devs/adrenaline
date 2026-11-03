@@ -112,6 +112,14 @@ function cefVersion() {
   } catch (e) { return 'CEF (pruned)'; }
 }
 
+function webgtkVersion() {
+  try {
+    const manifest = path.join(REPO_ROOT, 'vendor', 'webgtk-src', 'VERSION');
+    if (fs.existsSync(manifest)) return 'WebGTK ' + fs.readFileSync(manifest, 'utf8').trim();
+  } catch (e) { /* fall through */ }
+  return 'WebGTK (Blink/V8 OSR)';
+}
+
 function adrenalineVersion() {
   try {
     return JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'package.json'), 'utf8')).version;
@@ -159,10 +167,12 @@ function winner(values, lowerIsBetter = true) {
 const NUM_WORDS = ['zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten'];
 
 function buildReport(combined) {
-  // Order by the platform's canonical runtime order, then append anything else
-  // present (e.g. a merged run) so nothing is silently dropped.
+  // Order by the platform's canonical runtime order, then append any *still
+  // registered* runtime present in the evidence (e.g. a merged cross-platform
+  // run) so nothing is silently dropped. A runtime that has since been evicted
+  // from the registry (NW.js) is ignored even if old evidence still lists it.
   const known = ORDER.filter((r) => combined[r]);
-  const extra = Object.keys(combined).filter((r) => combined[r] && !known.includes(r));
+  const extra = Object.keys(combined).filter((r) => combined[r] && !known.includes(r) && RUNTIMES[r]);
   const runtimes = known.concat(extra);
   if (runtimes.length < 2) throw new Error('Need at least two runtimes in profiles-combined.json');
 
@@ -196,10 +206,10 @@ function buildReport(combined) {
     : 'System WebKitGTK';
   const engineNote = {
     electron: 'Bundled Chromium + Node.js',
-    nw: 'Bundled Chromium + Node.js (Node context in every window)',
     neutralino: 'OS system WebView + user-supplied backend process (here: Node.js extension)',
     'adrenaline-webview': systemWebviewName + ' + Node.js backend',
     'adrenaline-cef': 'Pruned CEF (Chromium Embedded Framework) + Node.js backend',
+    'adrenaline-webgtk': 'WebGTK (Blink/V8 offscreen view rendered in a GtkGLArea) + Node.js backend',
   };
   runtimes.forEach((r, i) => P('| ' + (i + 1) + ' | **' + labels[r] + '** | ' + (engineNote[r] || '') + ' |'));
   P('');
@@ -256,8 +266,8 @@ function buildReport(combined) {
   P('| Adrenaline.js | ' + adrenalineVersion() + ' |');
   P('| Adrenaline WebView engine | ' + webkitVersion() + ' |');
   if (runtimes.includes('adrenaline-cef')) P('| Adrenaline CEF engine | ' + cefVersion() + ' |');
+  if (runtimes.includes('adrenaline-webgtk')) P('| Adrenaline WebGTK engine | ' + webgtkVersion() + ' |');
   P('| Electron | ' + pkgVersion('electron', 'unknown') + ' |');
-  P('| NW.js | ' + pkgVersion('nw', 'unknown') + ' |');
   P('| Neutralinojs | ' + pkgVersion('@neutralinojs/neu', 'unknown') + ' CLI / v6.10.0 runtime |');
   P('| Display | ' + displayNote() + ' |');
   P('| Sampling interval | ' + combined[runtimes[0]].profile.intervalMs + ' ms |');
@@ -304,11 +314,11 @@ function buildReport(combined) {
   row('Process count (peak tree)', (m) => m.procs, '', 0);
 
   const nodeSupport = {
-    electron: 'Yes', nw: 'Yes', neutralino: '**No** (custom backend)',
-    'adrenaline-webview': 'Yes', 'adrenaline-cef': 'Yes',
+    electron: 'Yes', neutralino: '**No** (custom backend)',
+    'adrenaline-webview': 'Yes', 'adrenaline-cef': 'Yes', 'adrenaline-webgtk': 'Yes',
   };
   P('| **Real Node.js / npm Support** | ' + runtimes.map((r) => nodeSupport[r] || 'n/a').join(' | ') + ' | ' +
-    (runtimes.includes('neutralino') ? 'Electron / NW.js / Adrenaline' : 'n/a') + ' |');
+    (runtimes.includes('neutralino') ? 'Electron / Adrenaline' : 'n/a') + ' |');
   P('');
   P('> "Runtime Disk Footprint" counts only what an application must ship on disk.');
   P('> Shared OS libraries that already exist on the target machine (for example the');
@@ -420,7 +430,7 @@ function buildReport(combined) {
   }
   P('');
   P('Startup is dominated by how much browser engine each runtime has to bring up.');
-  P('Electron, NW.js' + (runtimes.includes('adrenaline-cef') ? ' and CEF' : '') + ' each initialise a Chromium browser process (plus its');
+  P('Electron' + (runtimes.includes('adrenaline-cef') ? ', CEF' : '') + (runtimes.includes('adrenaline-webgtk') ? ' and WebGTK' : '') + ' each initialise a Chromium/Blink browser process (plus its');
   P('GPU/utility helpers) before a page can paint. ' +
     (process.platform === 'linux' ? 'The two system-WebView runtimes' : 'The system-WebView runtimes'));
   P('(Adrenaline WebView and Neutralino) delegate rendering to ' +
@@ -436,7 +446,7 @@ function buildReport(combined) {
       fmt(mb(M[r].peakPssKb - M[r].idlePssKb)) + ' | ' + fmt(mb(M[r].peakPrivateKb)) + ' |');
   }
   P('');
-  P('The runtimes that bundle Chromium (Electron, NW.js' + (runtimes.includes('adrenaline-cef') ? ', CEF' : '') + ') carry the cost of a');
+  P('The runtimes that bundle a browser engine (Electron' + (runtimes.includes('adrenaline-cef') ? ', CEF' : '') + (runtimes.includes('adrenaline-webgtk') ? ', WebGTK' : '') + ') carry the cost of a');
   P('full browser: a browser process, one or more renderers, a GPU process and');
   P('zygotes, each with its own heap and V8 isolate. The system-WebView runtimes');
   P('share the OS renderer, so their private footprint is lower even when their');
@@ -466,7 +476,7 @@ function buildReport(combined) {
   }
   P('');
   P('Each runtime uses its own idiomatic bridge — Electron/Adrenaline');
-  P('`ipcRenderer`/`ipcMain`, NW.js background-page ↔ window relay, Neutralino');
+  P('`ipcRenderer`/`ipcMain`, Neutralino');
   P('extension WebSocket events — so these figures compare *the real IPC path a');
   P('developer would use*, not a synthetic uniform pipe.');
   P('');
@@ -476,7 +486,7 @@ function buildReport(combined) {
     P('- **' + labels[r] + ':** ' + fmt(M[r].footprintMb) + ' MB.');
   }
   P('');
-  P('Bundled-Chromium runtimes ship the browser engine in the payload. Neutralino');
+  P('Bundled-engine runtimes ship the browser engine in the payload. Neutralino');
   P('and Adrenaline WebView ship only a small binary/addon and lean on the OS');
   if (runtimes.includes('adrenaline-cef')) {
     P('WebView. The CEF runtime sits in between: a real embedded Chromium, but');
@@ -485,16 +495,18 @@ function buildReport(combined) {
   } else {
     P('WebView (WebView2 on Windows, WebKit on macOS), which the OS already provides.');
   }
+  if (runtimes.includes('adrenaline-webgtk')) {
+    P('The WebGTK runtime ships the pruned Blink/V8 core plus the small');
+    P('`libwebgtk.so` OSR view; it links the desktop GTK3 stack, which the OS');
+    P('already provides.');
+  }
   P('');
   P('### 7.6 Architectural trade-offs');
   P('');
   P('1. **Electron** — the reference point. Largest footprint and memory, but the');
   P('   most predictable: one pinned Chromium version, full Node.js in the main');
   P('   process, and a mature ecosystem.');
-  P('2. **NW.js** — also bundles Chromium, but exposes Node.js directly inside the');
-  P('   DOM context. That convenience costs memory (a Node context per window) and');
-  P('   makes the largest process tree in this test.');
-  P('3. **Neutralinojs** — the smallest binary by far. It ships no engine and no');
+  P('2. **Neutralinojs** — the smallest binary by far. It ships no engine and no');
   P('   Node.js: it uses the OS WebView for the UI and expects *you* to bring a');
   P('   backend (here a Node.js extension over a local WebSocket). The trade-off is');
   P('   a heavier IPC path — its latency is an order of magnitude above the others');
@@ -502,13 +514,20 @@ function buildReport(combined) {
   const webviewNote = process.platform === 'darwin' ? 'the OS Cocoa/WebKit webview'
     : process.platform === 'win32' ? 'the OS WebView2 (Edge) webview'
     : 'the OS WebKitGTK';
-  P('4. **Adrenaline.js (WebView)** — a thin native addon over ' + webviewNote + ',');
+  P('3. **Adrenaline.js (WebView)** — a thin native addon over ' + webviewNote + ',');
   P('   with a native (in-process) IPC bridge. Near-Neutralino disk footprint with');
   P('   Electron-class IPC latency, because the bridge does not leave the process.');
   if (runtimes.includes('adrenaline-cef')) {
-    P('5. **Adrenaline.js (CEF)** — embeds a real Chromium for full fidelity, but');
+    P('4. **Adrenaline.js (CEF)** — embeds a real Chromium for full fidelity, but');
     P('   pruned and with native IPC. It pays a Chromium-sized disk and memory bill');
     P('   while keeping the fast in-process bridge.');
+  }
+  if (runtimes.includes('adrenaline-webgtk')) {
+    P('5. **Adrenaline.js (WebGTK)** — the sister project: the pruned Blink/V8 core');
+    P('   renders offscreen and `libwebgtk.so` composites each frame as an OpenGL');
+    P('   texture inside a `GtkGLArea`. It replaces WebKitGTK with a pinned Blink,');
+    P('   keeping full fidelity and the native in-process bridge at a smaller');
+    P('   footprint than CEF.');
   }
   P('');
   P('---');
@@ -521,8 +540,9 @@ function buildReport(combined) {
   P('');
   P('```bash');
   P('npm install');
-  P('npm run benchmark:setup          # ' + (process.platform === 'linux' ? 'build both Adrenaline addons' : 'build the Adrenaline addons') + ' + fetch Neutralino');
+  P('npm run benchmark:setup          # build the Adrenaline addons + fetch Neutralino');
   if (process.platform === 'linux') P('npm run setup:cef                # pruned CEF distribution (for the CEF runtime)');
+  if (process.platform === 'linux') P('npm run setup:webgtk            # libwebgtk.so (for the WebGTK runtime)');
   P('cd benchmarks/stress-suite');
   P('node run.js                      # ' + (process.platform === 'linux' ? 'all five' : 'every available') + ' runtime' + (process.platform === 'linux' ? 's' : '') + ', ' + (duration / 1000) + 's each, sequentially');
   P('node report.js                   # regenerate ' + (process.platform === 'linux' ? 'benchmarks/ROYAL_RUMBLE_SHOWDOWN.md' : 'the report for this platform'));
@@ -531,8 +551,8 @@ function buildReport(combined) {
   P('`npm run benchmark` runs the last two steps together. Requirements: Node.js');
   if (process.platform === 'linux') {
     P('≥ 16, `xvfb-run` + `Xvfb`, GTK3 + WebKitGTK 4.1 (for the WebView and');
-    P('Neutralino runs), `unzip` (Neutralino fetch), and a C compiler (`cc`/`gcc`) for');
-    P('the subreaper wrapper.');
+    P('Neutralino runs), GTK3 development files (for the WebGTK build), `unzip`');
+    P('(Neutralino fetch), and a C compiler (`cc`/`gcc`) for the subreaper wrapper.');
   } else if (process.platform === 'win32') {
     P('≥ 18, the MSVC build tools (for the native addon) and the WebView2 Evergreen');
     P('runtime (present on the GitHub-hosted `windows-latest` runner).');
@@ -575,8 +595,7 @@ function buildReport(combined) {
   P('- The ' + nWord + ' runs are **sequential, never concurrent**, so no two compete for CPU.');
   P('- Every runtime loads the **same `index.html`, `renderer.js` and stress core**;');
   P('  only the IPC binding differs (Adrenaline injects `window.adrenaline` natively,');
-  P('  Electron uses `preload.js`, NW.js relays through the background page,');
-  P('  Neutralino uses extension events).');
+  P('  Electron uses `preload.js`, Neutralino uses extension events).');
   if (process.platform === 'linux') {
     P('- All run headless under `xvfb-run -a` at the same window size.');
   } else {

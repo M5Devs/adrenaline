@@ -41,7 +41,7 @@ jobs:
         run: npm install --no-audit --no-fund
 
       # Fetches the Neutralinojs runtime and stashes one Adrenaline addon per
-      # engine. (CEF is Linux-only, so it is skipped here.)
+      # engine. (CEF and WebGTK are Linux-only, so they are skipped here.)
       - name: Provision benchmark runtimes
         run: node benchmarks/stress-suite/setup.js
 

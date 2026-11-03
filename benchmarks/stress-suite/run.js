@@ -10,7 +10,7 @@
  *
  * Usage:
  *   node run.js                     # all runtimes available on this platform
- *   node run.js electron nw         # a subset, in the given order
+ *   node run.js electron neutralino # a subset, in the given order
  *   STRESS_DURATION_MS=8000 node run.js   # shorter smoke run
  *
  * A single runtime failing (e.g. its binary is missing) does not abort the whole

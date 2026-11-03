@@ -12,10 +12,13 @@ const resolved = build.resolveEngine();
 assert.strictEqual(resolved.engine, 'cef', 'engine should come from adrenaline.config.js');
 assert.strictEqual(resolved.source, 'adrenaline.config.js', 'source should be the config file');
 
-// 2. CEF availability guard: missing vendor tree degrades to webview, not a hard fail.
-assert.deepStrictEqual(build.selectEngine('cef', false), { selected: 'webview', fellBack: true });
-assert.deepStrictEqual(build.selectEngine('cef', true), { selected: 'cef', fellBack: false });
-assert.deepStrictEqual(build.selectEngine('webview', false), { selected: 'webview', fellBack: false });
+// 2. Engine availability guard: a missing vendor tree degrades to webview, not
+//    a hard fail, for both optional engines.
+assert.deepStrictEqual(build.selectEngine('cef', false, false), { selected: 'webview', fellBack: true });
+assert.deepStrictEqual(build.selectEngine('cef', true, false), { selected: 'cef', fellBack: false });
+assert.deepStrictEqual(build.selectEngine('webgtk', false, false), { selected: 'webview', fellBack: true });
+assert.deepStrictEqual(build.selectEngine('webgtk', false, true), { selected: 'webgtk', fellBack: false });
+assert.deepStrictEqual(build.selectEngine('webview', false, false), { selected: 'webview', fellBack: false });
 
 // 3. Explicit command line beats the config.
 const cli = spawnSync(process.execPath, ['-e', "console.log(require('./scripts/build').resolveEngine().engine)"], {

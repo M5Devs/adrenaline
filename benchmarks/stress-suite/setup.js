@@ -10,16 +10,18 @@
  *
  *   - Adrenaline.js addon(s). `npm run build` produces one engine at a time (the
  *     engine is a compile-time define), so we build the webview addon and stash
- *     it. On Linux the CEF addon is built too (the vendored CEF distribution is
- *     linux64-only); on Windows/macOS CEF is skipped. The runners pick the right
- *     addon up via ADREN_ADDON_PATH.
+ *     it. On Linux the CEF and WebGTK addons are built too (the vendored CEF
+ *     distribution is linux64-only, and WebGTK is a GTK3 view); on
+ *     Windows/macOS they are skipped. The runners pick the right addon up via
+ *     ADREN_ADDON_PATH.
  *   - The Neutralinojs standalone binary from GitHub releases, plus its client
  *     library, into `neu-app/`. The release zip carries every platform's binary,
  *     so the same URL works everywhere and the platform-specific binary is
  *     extracted by name.
  *
- * NW.js and Electron come from `npm install` (they are devDependencies), and the
- * pruned CEF distribution (Linux) comes from `npm run setup:cef`.
+ * Electron comes from `npm install` (it is a devDependency), the pruned CEF
+ * distribution (Linux) comes from `npm run setup:cef`, and the WebGTK library
+ * (Linux) comes from `npm run setup:webgtk`.
  *
  * Every step is idempotent: already-present artifacts are left alone unless
  * --force is given.
@@ -113,6 +115,14 @@ async function main() {
   // built where it can actually run.
   if (process.platform === 'linux') {
     buildAdrenaline('cef', path.join(ARTIFACTS, 'adrenaline-cef.node'));
+    // WebGTK is a GTK3 view; only build it once its library has been provisioned
+    // by `npm run setup:webgtk` (otherwise build.js falls back to webview).
+    const webgtkLib = path.join(REPO_ROOT, 'vendor', 'webgtk', 'lib', 'libwebgtk.so');
+    if (exists(webgtkLib)) {
+      buildAdrenaline('webgtk', path.join(ARTIFACTS, 'adrenaline-webgtk.node'));
+    } else {
+      log('libwebgtk.so not found; skipping the WebGTK addon (run `npm run setup:webgtk`).');
+    }
   }
 
   await provisionNeutralino();
