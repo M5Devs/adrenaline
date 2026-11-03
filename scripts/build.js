@@ -27,6 +27,10 @@ const { spawnSync } = require('child_process');
 
 const ROOT = path.resolve(__dirname, '..');
 const CEF_LIB = path.join(ROOT, 'vendor', 'cef', 'Release', 'libcef.so');
+// libwebgtk.so is built from the sister project (github.com/M5Devs/webgtk).
+// Vendored here by `scripts/setup-webgtk.js`; WEBGTK_ROOT overrides the root.
+const WEBGTK_ROOT = path.resolve(process.env.WEBGTK_ROOT || path.join(ROOT, 'vendor', 'webgtk'));
+const WEBGTK_LIB = path.join(process.env.WEBGTK_LIB_DIR || path.join(WEBGTK_ROOT, 'lib'), 'libwebgtk.so');
 
 const argv = process.argv.slice(2);
 
@@ -53,12 +57,15 @@ function resolveEngine() {
 }
 
 /**
- * Apply the CEF-availability guard: the vendor tree is gitignored, so a fresh
- * checkout / CI has none. Rather than fail the build, fall back to the
- * always-available webview engine.
+ * Apply the engine-availability guard: the CEF vendor tree and the WebGTK
+ * library are gitignored, so a fresh checkout / CI has neither. Rather than fail
+ * the build, fall back to the always-available webview engine.
  */
-function selectEngine(engine, cefAvailable) {
+function selectEngine(engine, cefAvailable, webgtkAvailable) {
   if (engine === 'cef' && !cefAvailable) {
+    return { selected: 'webview', fellBack: true };
+  }
+  if (engine === 'webgtk' && !webgtkAvailable) {
     return { selected: 'webview', fellBack: true };
   }
   return { selected: engine, fellBack: false };
@@ -82,12 +89,15 @@ function ensureWebView2Sdk(engine) {
 
 function main() {
   const { engine, source } = resolveEngine();
-  const { selected, fellBack } = selectEngine(engine, fs.existsSync(CEF_LIB));
+  const { selected, fellBack } = selectEngine(engine, fs.existsSync(CEF_LIB), fs.existsSync(WEBGTK_LIB));
 
   if (fellBack) {
+    const missing = engine === 'webgtk'
+      ? `libwebgtk.so is missing (looked in ${path.relative(ROOT, path.dirname(WEBGTK_LIB))})`
+      : `${path.relative(ROOT, CEF_LIB)} is missing`;
     process.stderr.write(
-      `[build] engine "cef" requested by ${source} but ${path.relative(ROOT, CEF_LIB)} is missing;\n` +
-      '[build] falling back to webview. Run `npm run setup:cef` first to build against CEF.\n'
+      `[build] engine "${engine}" requested by ${source} but ${missing};\n` +
+      `[build] falling back to webview. Run \`npm run setup:${engine === 'webgtk' ? 'webgtk' : 'cef'}\` first to build against ${engine}.\n`
     );
   } else {
     process.stdout.write(`[build] engine: ${selected} (from ${source})\n`);
@@ -116,7 +126,7 @@ function main() {
   process.exit(res.status === null ? 1 : res.status);
 }
 
-module.exports = { resolveEngine, selectEngine, readFlag, CEF_LIB };
+module.exports = { resolveEngine, selectEngine, readFlag, CEF_LIB, WEBGTK_LIB, WEBGTK_ROOT };
 
 if (require.main === module) {
   main();

@@ -36,6 +36,23 @@ for (const key of ['ADREN_FEATURE_WEBRTC', 'ADREN_FEATURE_CLEAN_PRIVACY', 'ADREN
   assert.ok(defines.includes(`${key}=`), `gypDefines must include ${key}`);
 }
 
+// 2b. The resolver recognises the three engines and compiles exactly one in.
+assert.deepStrictEqual(resolver.SUPPORTED_ENGINES, ['webview', 'cef', 'webgtk']);
+{
+  const engDir = fs.mkdtempSync(path.join(os.tmpdir(), 'adren-eng-'));
+  for (const engine of resolver.SUPPORTED_ENGINES) {
+    fs.writeFileSync(path.join(engDir, 'adrenaline.config.js'), `module.exports = { engine: '${engine}' };\n`);
+    const d = resolver.gypDefines(engDir);
+    assert.strictEqual((d.match(/ADREN_FEATURE_CEF=1/) ? 1 : 0), engine === 'cef' ? 1 : 0, `CEF define for ${engine}`);
+    assert.strictEqual((d.match(/ADREN_FEATURE_WEBVIEW=1/) ? 1 : 0), engine === 'webview' ? 1 : 0, `WebView define for ${engine}`);
+    assert.strictEqual((d.match(/ADREN_FEATURE_WEBGTK=1/) ? 1 : 0), engine === 'webgtk' ? 1 : 0, `WebGTK define for ${engine}`);
+  }
+  // An unknown engine degrades to webview rather than emitting a bogus define.
+  fs.writeFileSync(path.join(engDir, 'adrenaline.config.js'), "module.exports = { engine: 'electron' };\n");
+  assert.strictEqual(resolver.resolve(engDir).engine, 'webview', 'unknown engine falls back to webview');
+  fs.rmSync(engDir, { recursive: true, force: true });
+}
+
 // 3. Defaults apply when no config file is present
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'adren-cfg-'));
 const defaults = resolver.resolve(tmp);

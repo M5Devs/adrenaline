@@ -31,4 +31,11 @@
 #define ADREN_FEATURE_WEBVIEW 1
 #endif
 
+// WebGTK engine: the custom GTK3/GTK4 Blink/V8 OSR view from the sister
+// project (github.com/M5Devs/webgtk), linked in as `libwebgtk.so`. Selected by
+// `engine: 'webgtk'`; mutually exclusive with CEF and the system webview.
+#ifndef ADREN_FEATURE_WEBGTK
+#define ADREN_FEATURE_WEBGTK 0
+#endif
+
 #endif // ADRENALINE_FEATURES_H

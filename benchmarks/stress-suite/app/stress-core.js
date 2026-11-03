@@ -11,9 +11,9 @@
  *   transport.on(channel, handler)   register a handler for messages *from* the UI
  *   transport.send(channel, data)    deliver a message *to* the UI
  *
- * Electron and Adrenaline.js adapt their ipcMain/webContents; NW.js adapts its
- * background-page <-> window bridge; Neutralinojs adapts its extension
- * WebSocket. See app/backend.js for the Electron/Adrenaline adapter.
+ * Electron and Adrenaline.js adapt their ipcMain/webContents; Neutralinojs
+ * adapts its extension WebSocket. See app/backend.js for the
+ * Electron/Adrenaline adapter.
  *
  * Protocol (UI -> backend):
  *   'first-paint'  : first DOM paint happened (startup metric)

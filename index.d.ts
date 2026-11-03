@@ -8,6 +8,7 @@ export interface CompiledFeatures {
   cleanPrivacy: boolean;
   cef: boolean;
   webview: boolean;
+  webgtk: boolean;
   config: {
     engine: string;
     modules: Record<string, boolean>;

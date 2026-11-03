@@ -1,17 +1,16 @@
-# 👑 The Royal Rumble: 5-Way JavaScript Desktop Runtime Showdown
+# 👑 The Royal Rumble: 4-Way JavaScript Desktop Runtime Showdown
 
-> An automated, reproducible, headless benchmark of five JavaScript desktop
+> An automated, reproducible, headless benchmark of four JavaScript desktop
 > runtimes executing **one identical heavy desktop workload** for 30 seconds each.
 
 | # | Runtime | Engine / Backend |
 | :-- | :--- | :--- |
 | 1 | **Electron** | Bundled Chromium + Node.js |
-| 2 | **NW.js** | Bundled Chromium + Node.js (Node context in every window) |
-| 3 | **Neutralinojs** | OS system WebView + user-supplied backend process (here: Node.js extension) |
-| 4 | **Adrenaline.js (WebView)** | System WebKitGTK + Node.js backend |
-| 5 | **Adrenaline.js (CEF)** | Pruned CEF (Chromium Embedded Framework) + Node.js backend |
+| 2 | **Neutralinojs** | OS system WebView + user-supplied backend process (here: Node.js extension) |
+| 3 | **Adrenaline.js (WebView)** | System WebKitGTK + Node.js backend |
+| 4 | **Adrenaline.js (CEF)** | Pruned CEF (Chromium Embedded Framework) + Node.js backend |
 
-Generated: `2026-11-02T14:59:11.164Z`  
+Generated: `2026-11-03T22:36:24.318Z`  
 Harness: `benchmarks/stress-suite/`  
 Raw evidence: `benchmarks/stress-suite/profiles-combined.json`
 
@@ -19,7 +18,7 @@ Raw evidence: `benchmarks/stress-suite/profiles-combined.json`
 
 ## 1. Executive Summary
 
-All five runtimes ran the *same application* — one shared frontend/backend
+All four runtimes ran the *same application* — one shared frontend/backend
 codebase that renders and mutates a **10,000-record virtualised dataset**,
 streams **100 JSON IPC packets/second** with per-packet round-trip timing, and
 runs **2 SHA-256 CPU workers** saturating the remaining cores. The only
@@ -31,7 +30,7 @@ identical (see §4 for the proof).
 - **Fastest cold start (to first paint):** Electron at **349 ms**.
 - **Smallest shipped payload:** Adrenaline.js (WebView) at **121.1 MB**.
 - **Lowest IPC p95 latency:** Electron at **2.015 ms**.
-- **Lowest average CPU:** NW.js at **249.6 %**.
+- **Lowest average CPU:** Adrenaline.js (CEF) at **252.7 %**.
 
 All measurements below come from `/proc` with 500 ms sampling over a
 30-second sustained stress window, after a clean idle baseline. No value is
@@ -43,7 +42,7 @@ estimated, interpolated, or scaled.
 
 | Property | Value |
 | :--- | :--- |
-| Host | `runtime-opbmqlakkxsmfbsu-668b56b8d5-fv88n` |
+| Host | `runtime-ftocegewodexuwgh-559b46975-jkh28` |
 | OS | Debian GNU/Linux 13 (trixie) |
 | Kernel | `6.8.0-1055-gke` (x64) |
 | CPU | AMD EPYC 9B14 |
@@ -52,9 +51,8 @@ estimated, interpolated, or scaled.
 | Node.js | v24.21.0 |
 | Adrenaline.js | 0.5.0 |
 | Adrenaline WebView engine | WebKitGTK 2.54.0 |
-| Adrenaline CEF engine | CEF 150.0.23+g4ccc4ca+chromium-150.0.7871.287 (Chromium 150.0.7871.287) |
+| Adrenaline CEF engine | CEF (pruned) |
 | Electron | 45.2.1 |
-| NW.js | 0.119.2 |
 | Neutralinojs | 11.8.0 CLI / v6.10.0 runtime |
 | Display | Xvfb (headless X server, `xvfb-run -a`) |
 | Sampling interval | 500 ms |
@@ -68,20 +66,20 @@ estimated, interpolated, or scaled.
 
 Lower is better for every metric. **Bold** marks the winner of each row.
 
-| Metric | Electron | NW.js | Neutralinojs | Adrenaline.js (WebView) | Adrenaline.js (CEF) | Winner 🏆 |
-| :--- | ---: | ---: | ---: | ---: | ---: | :--- |
-| **Startup Time (to first paint)** | **349 ms** | 4120 ms | 683 ms | 520 ms | 417 ms | Electron |
-| **Idle Memory (PSS)** | **286.1 MB** | 463.9 MB | 407.0 MB | 383.3 MB | 358.9 MB | Electron |
-| **Peak Stress Memory (PSS)** | 650.0 MB | 917.7 MB | 490.6 MB | 500.9 MB | **442.9 MB** | Adrenaline.js (CEF) |
-| **Peak Private Memory** | 500.2 MB | 728.9 MB | **339.0 MB** | 351.4 MB | 356.6 MB | Neutralinojs |
-| **Avg CPU Load** | 261.7 % | **249.6 %** | 263.7 % | 281.2 % | 252.7 % | NW.js |
-| **Peak CPU Load** | 277.0 % | 267.8 % | 284.0 % | 302.0 % | **265.0 %** | Adrenaline.js (CEF) |
-| **IPC Latency (mean)** | **0.601 ms** | 0.929 ms | 28.308 ms | 2.020 ms | 0.854 ms | Electron |
-| **IPC Latency (p95)** | **2.015 ms** | 2.520 ms | 50.815 ms | 5.511 ms | 2.514 ms | Electron |
-| **IPC Latency (p99)** | **3.563 ms** | 4.521 ms | 53.314 ms | 10.906 ms | 6.193 ms | Electron |
-| **Runtime Disk Footprint (shipped)** | 273.8 MB | 510.8 MB | 123.6 MB | **121.1 MB** | 413.1 MB | Adrenaline.js (WebView) |
-| **Process count (peak tree)** | 11 | 14 | 10 | 8 | **6** | Adrenaline.js (CEF) |
-| **Real Node.js / npm Support** | Yes | Yes | **No** (custom backend) | Yes | Yes | Electron / NW.js / Adrenaline |
+| Metric | Electron | Neutralinojs | Adrenaline.js (WebView) | Adrenaline.js (CEF) | Winner 🏆 |
+| :--- | ---: | ---: | ---: | ---: | :--- |
+| **Startup Time (to first paint)** | **349 ms** | 683 ms | 520 ms | 417 ms | Electron |
+| **Idle Memory (PSS)** | **286.1 MB** | 407.0 MB | 383.3 MB | 358.9 MB | Electron |
+| **Peak Stress Memory (PSS)** | 650.0 MB | 490.6 MB | 500.9 MB | **442.9 MB** | Adrenaline.js (CEF) |
+| **Peak Private Memory** | 500.2 MB | **339.0 MB** | 351.4 MB | 356.6 MB | Neutralinojs |
+| **Avg CPU Load** | 261.7 % | 263.7 % | 281.2 % | **252.7 %** | Adrenaline.js (CEF) |
+| **Peak CPU Load** | 277.0 % | 284.0 % | 302.0 % | **265.0 %** | Adrenaline.js (CEF) |
+| **IPC Latency (mean)** | **0.601 ms** | 28.308 ms | 2.020 ms | 0.854 ms | Electron |
+| **IPC Latency (p95)** | **2.015 ms** | 50.815 ms | 5.511 ms | 2.514 ms | Electron |
+| **IPC Latency (p99)** | **3.563 ms** | 53.314 ms | 10.906 ms | 6.193 ms | Electron |
+| **Runtime Disk Footprint (shipped)** | 273.8 MB | 123.6 MB | **121.1 MB** | 413.1 MB | Adrenaline.js (WebView) |
+| **Process count (peak tree)** | 11 | 10 | 8 | **6** | Adrenaline.js (CEF) |
+| **Real Node.js / npm Support** | Yes | **No** (custom backend) | Yes | Yes | Electron / Adrenaline |
 
 > "Runtime Disk Footprint" counts only what an application must ship on disk.
 > Shared OS libraries that already exist on the target machine (for example the
@@ -92,16 +90,16 @@ Lower is better for every metric. **Bold** marks the winner of each row.
 
 ## 4. Workload Verification (all runtimes did the same work)
 
-| Counter | Electron | NW.js | Neutralinojs | Adrenaline.js (WebView) | Adrenaline.js (CEF) |
-| :--- | ---: | ---: | ---: | ---: | ---: |
-| Dataset size (records) | 10000 | 10000 | 10000 | 10000 | 10000 |
-| IPC packets sent | 2924 | 2916 | 2956 | 2932 | 2946 |
-| IPC packets acknowledged | 2924 | 2916 | 2952 | 2932 | 2946 |
-| IPC packets unacknowledged | 0 | 0 | 4 | 0 | 0 |
-| SHA-256 blocks hashed | 13775040 | 13391680 | 19847872 | 18438016 | 20283968 |
-| SHA-256 data hashed (MB) | 107618 | 104623 | 155062 | 144047 | 158469 |
-| Process tree size (peak) | 11 | 14 | 10 | 8 | 6 |
-| Profiler samples collected | 57 | 55 | 57 | 57 | 58 |
+| Counter | Electron | Neutralinojs | Adrenaline.js (WebView) | Adrenaline.js (CEF) |
+| :--- | ---: | ---: | ---: | ---: |
+| Dataset size (records) | 10000 | 10000 | 10000 | 10000 |
+| IPC packets sent | 2924 | 2956 | 2932 | 2946 |
+| IPC packets acknowledged | 2924 | 2952 | 2932 | 2946 |
+| IPC packets unacknowledged | 0 | 4 | 0 | 0 |
+| SHA-256 blocks hashed | 13775040 | 19847872 | 18438016 | 20283968 |
+| SHA-256 data hashed (MB) | 107618 | 155062 | 144047 | 158469 |
+| Process tree size (peak) | 11 | 10 | 8 | 6 |
+| Profiler samples collected | 57 | 57 | 57 | 58 |
 
 The near-identical packet and hash counters confirm every runtime executed the
 same workload, so the memory, CPU and latency deltas reflect the runtimes, not
@@ -133,26 +131,6 @@ every shared Chromium/WebKit `.so`.
 | `xvfb-run` | 10175 | 0.3 | 0.1 | 1.9 |
 | `reaper` | 10174 | 0.2 | 0.1 | 1.4 |
 | **Total** | | **650.0** | **500.2** | **1146.7** |
-
-### NW.js — 14 processes, peak total 917.7 MB PSS
-
-| Process | PID | PSS (MB) | Private (MB) | RSS (MB) |
-| :--- | ---: | ---: | ---: | ---: |
-| `exe` | 10604 | 202.8 | 164.4 | 313.4 |
-| `nw` | 10678 | 200.5 | 181.6 | 276.6 |
-| `nw` | 10679 | 196.8 | 177.9 | 273.1 |
-| `nw` | 10461 | 129.6 | 102.5 | 218.3 |
-| `Xvfb` | 10458 | 43.2 | 20.9 | 70.1 |
-| `exe` | 10547 | 39.9 | 18.0 | 118.8 |
-| `exe` | 10551 | 36.5 | 20.2 | 110.7 |
-| `exe` | 10589 | 25.3 | 15.2 | 88.9 |
-| `nw` | 10474 | 21.9 | 14.7 | 76.1 |
-| `nw` | 10473 | 21.9 | 14.7 | 76.0 |
-| `chrome_crashpad` | 10465 | 1.5 | 0.8 | 4.0 |
-| `chrome_crashpad` | 10468 | 1.0 | 0.4 | 3.4 |
-| `xvfb-run` | 10448 | 0.3 | 0.1 | 1.8 |
-| `reaper` | 10447 | 0.2 | 0.1 | 1.4 |
-| **Total** | | **917.7** | **728.9** | **1630.4** |
 
 ### Neutralinojs — 10 processes, peak total 490.6 MB PSS
 
@@ -215,15 +193,6 @@ excluding OS packages already present on every machine.
 | runner code | 0.1 |
 | **Total (shipped)** | **273.8** |
 
-### NW.js — total 510.8 MB shipped
-
-| Component | Size (MB) |
-| :--- | ---: |
-| NW.js distribution (nw binary + libnw.so + Chromium + Node + ICU) | 510.8 |
-| application assets (app/) | 0.1 |
-| runner code (nw-app/) | 0.0 |
-| **Total (shipped)** | **510.8** |
-
 ### Neutralinojs — total 123.6 MB shipped
 
 | Component | Size (MB) |
@@ -271,13 +240,12 @@ excluding OS packages already present on every machine.
 ### 7.1 Startup to first paint
 
 - **Electron:** 349 ms.
-- **NW.js:** 4120 ms.
 - **Neutralinojs:** 683 ms.
 - **Adrenaline.js (WebView):** 520 ms.
 - **Adrenaline.js (CEF):** 417 ms.
 
 Startup is dominated by how much browser engine each runtime has to bring up.
-Electron, NW.js and CEF each initialise a Chromium browser process (plus its
+Electron, CEF each initialise a Chromium/Blink browser process (plus its
 GPU/utility helpers) before a page can paint. The two system-WebView runtimes
 (Adrenaline WebView and Neutralino) delegate rendering to a WebKitGTK process
 the OS keeps warm, which is why they start in a similar range.
@@ -287,12 +255,11 @@ the OS keeps warm, which is why they start in a similar range.
 | Runtime | Idle PSS (MB) | Peak PSS (MB) | Growth (MB) | Peak Private (MB) |
 | :--- | ---: | ---: | ---: | ---: |
 | Electron | 286.1 | 650.0 | 363.9 | 500.2 |
-| NW.js | 463.9 | 917.7 | 453.8 | 728.9 |
 | Neutralinojs | 407.0 | 490.6 | 83.6 | 339.0 |
 | Adrenaline.js (WebView) | 383.3 | 500.9 | 117.5 | 351.4 |
 | Adrenaline.js (CEF) | 358.9 | 442.9 | 84.0 | 356.6 |
 
-The runtimes that bundle Chromium (Electron, NW.js, CEF) carry the cost of a
+The runtimes that bundle a browser engine (Electron, CEF) carry the cost of a
 full browser: a browser process, one or more renderers, a GPU process and
 zygotes, each with its own heap and V8 isolate. The system-WebView runtimes
 share the OS renderer, so their private footprint is lower even when their
@@ -303,7 +270,6 @@ shared PSS is comparable.
 Average CPU across the whole process tree over the stress window:
 
 - **Electron:** 261.7 % average, 277.0 % peak (2.6 of 4 cores busy).
-- **NW.js:** 249.6 % average, 267.8 % peak (2.5 of 4 cores busy).
 - **Neutralinojs:** 263.7 % average, 284.0 % peak (2.6 of 4 cores busy).
 - **Adrenaline.js (WebView):** 281.2 % average, 302.0 % peak (2.8 of 4 cores busy).
 - **Adrenaline.js (CEF):** 252.7 % average, 265.0 % peak (2.5 of 4 cores busy).
@@ -319,25 +285,23 @@ Round-trip latency (backend send → renderer → ack) per runtime:
 | Runtime | mean (ms) | p95 (ms) | p99 (ms) | samples |
 | :--- | ---: | ---: | ---: | ---: |
 | Electron | 0.601 | 2.015 | 3.563 | 2924 |
-| NW.js | 0.929 | 2.520 | 4.521 | 2916 |
 | Neutralinojs | 28.308 | 50.815 | 53.314 | 2952 |
 | Adrenaline.js (WebView) | 2.020 | 5.511 | 10.906 | 2932 |
 | Adrenaline.js (CEF) | 0.854 | 2.514 | 6.193 | 2946 |
 
 Each runtime uses its own idiomatic bridge — Electron/Adrenaline
-`ipcRenderer`/`ipcMain`, NW.js background-page ↔ window relay, Neutralino
+`ipcRenderer`/`ipcMain`, Neutralino
 extension WebSocket events — so these figures compare *the real IPC path a
 developer would use*, not a synthetic uniform pipe.
 
 ### 7.5 Disk footprint
 
 - **Electron:** 273.8 MB.
-- **NW.js:** 510.8 MB.
 - **Neutralinojs:** 123.6 MB.
 - **Adrenaline.js (WebView):** 121.1 MB.
 - **Adrenaline.js (CEF):** 413.1 MB.
 
-Bundled-Chromium runtimes ship the browser engine in the payload. Neutralino
+Bundled-engine runtimes ship the browser engine in the payload. Neutralino
 and Adrenaline WebView ship only a small binary/addon and lean on the OS
 WebView. The CEF runtime sits in between: a real embedded Chromium, but
 pruned (locales reduced to `en-US`, devtools/PDF stripped, debug symbols
@@ -348,18 +312,15 @@ removed) rather than shipped whole.
 1. **Electron** — the reference point. Largest footprint and memory, but the
    most predictable: one pinned Chromium version, full Node.js in the main
    process, and a mature ecosystem.
-2. **NW.js** — also bundles Chromium, but exposes Node.js directly inside the
-   DOM context. That convenience costs memory (a Node context per window) and
-   makes the largest process tree in this test.
-3. **Neutralinojs** — the smallest binary by far. It ships no engine and no
+2. **Neutralinojs** — the smallest binary by far. It ships no engine and no
    Node.js: it uses the OS WebView for the UI and expects *you* to bring a
    backend (here a Node.js extension over a local WebSocket). The trade-off is
    a heavier IPC path — its latency is an order of magnitude above the others
    because every message crosses a WebSocket hop.
-4. **Adrenaline.js (WebView)** — a thin native addon over the OS WebKitGTK,
+3. **Adrenaline.js (WebView)** — a thin native addon over the OS WebKitGTK,
    with a native (in-process) IPC bridge. Near-Neutralino disk footprint with
    Electron-class IPC latency, because the bridge does not leave the process.
-5. **Adrenaline.js (CEF)** — embeds a real Chromium for full fidelity, but
+4. **Adrenaline.js (CEF)** — embeds a real Chromium for full fidelity, but
    pruned and with native IPC. It pays a Chromium-sized disk and memory bill
    while keeping the fast in-process bridge.
 
@@ -371,8 +332,9 @@ removed) rather than shipped whole.
 
 ```bash
 npm install
-npm run benchmark:setup          # build both Adrenaline addons + fetch Neutralino
+npm run benchmark:setup          # build the Adrenaline addons + fetch Neutralino
 npm run setup:cef                # pruned CEF distribution (for the CEF runtime)
+npm run setup:webgtk            # libwebgtk.so (for the WebGTK runtime)
 cd benchmarks/stress-suite
 node run.js                      # all five runtimes, 30s each, sequentially
 node report.js                   # regenerate benchmarks/ROYAL_RUMBLE_SHOWDOWN.md
@@ -380,8 +342,8 @@ node report.js                   # regenerate benchmarks/ROYAL_RUMBLE_SHOWDOWN.m
 
 `npm run benchmark` runs the last two steps together. Requirements: Node.js
 ≥ 16, `xvfb-run` + `Xvfb`, GTK3 + WebKitGTK 4.1 (for the WebView and
-Neutralino runs), `unzip` (Neutralino fetch), and a C compiler (`cc`/`gcc`) for
-the subreaper wrapper.
+Neutralino runs), GTK3 development files (for the WebGTK build), `unzip`
+(Neutralino fetch), and a C compiler (`cc`/`gcc`) for the subreaper wrapper.
 
 ### Measurement definitions
 
@@ -402,11 +364,10 @@ the subreaper wrapper.
 
 ### Fairness controls
 
-- The five runs are **sequential, never concurrent**, so no two compete for CPU.
+- The four runs are **sequential, never concurrent**, so no two compete for CPU.
 - Every runtime loads the **same `index.html`, `renderer.js` and stress core**;
   only the IPC binding differs (Adrenaline injects `window.adrenaline` natively,
-  Electron uses `preload.js`, NW.js relays through the background page,
-  Neutralino uses extension events).
+  Electron uses `preload.js`, Neutralino uses extension events).
 - All run headless under `xvfb-run -a` at the same window size.
 - The profiler samples the **entire process tree**, not just the top process.
 
@@ -420,7 +381,6 @@ zombie — is left behind.
 | Runtime | Term. time (ms) | Escalated to SIGKILL | Leftover live procs | Clean |
 | :--- | ---: | :--- | ---: | :--- |
 | Electron | 1929 | no | 0 | ✅ |
-| NW.js | 2133 | no | 0 | ✅ |
 | Neutralinojs | 3653 | no | 0 | ✅ |
 | Adrenaline.js (WebView) | 2032 | no | 0 | ✅ |
 | Adrenaline.js (CEF) | 2132 | no | 0 | ✅ |
